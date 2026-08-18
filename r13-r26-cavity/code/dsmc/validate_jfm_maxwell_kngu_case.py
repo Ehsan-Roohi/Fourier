@@ -44,7 +44,10 @@ def validate_case(case_dir: Path, expected_kn_gu: float, require_final: bool) ->
         "accumulated_samples_per_cell": 20_000,
         "viscosity_index": 1.0,
         "vss_alpha": 2.14,
-        "dump_schema_version": "maxwell_vss_antifourier_v1_15_fields",
+        "block_steps": 20_000,
+        "block_count": 10,
+        "samples_per_block_per_cell": 2_000,
+        "dump_schema_version": "maxwell_vss_antifourier_v2_blocked_15_fields",
         "dump_field_count": 15,
         "dump_columns": generator.DUMP_COLUMNS,
     }
@@ -109,7 +112,8 @@ def validate_case(case_dir: Path, expected_kn_gu: float, require_final: bool) ->
         "compute              heat eflux/grid all gas heatx heaty",
         "compute              stress pflux/grid all gas momxx momxy momyy momzz",
         "compute              sonine sonine/grid all gas b xx 1 b xy 1 b yy 1 b zz 1",
-        "c_flow[*] c_thermal[*] c_heat[*] c_stress[*] c_sonine[*]",
+        "fix                  blockavg ave/grid",
+        "fix                  finalavg ave/grid",
     )
     for required in required_deck_lines:
         if required not in deck:
@@ -126,7 +130,7 @@ def validate_case(case_dir: Path, expected_kn_gu: float, require_final: bool) ->
             (line.strip() for line in handle if line.startswith("ITEM: CELLS")),
             "",
         )
-    expected_fields = [f"f_fieldavg[{index}]" for index in range(1, 16)]
+    expected_fields = [f"f_finalavg[{index}]" for index in range(1, 16)]
     if header.split() != ["ITEM:", "CELLS", "id", "xc", "yc", *expected_fields]:
         raise ValueError(f"unexpected final-grid schema: {header}")
     return final
