@@ -1,1 +1,233 @@
-sed: can't read : No such file or directory
+{
+  "results": [
+    {
+      "audit": {
+        "kn": 0.049999999999999996,
+        "lid_velocity_m_s": 100.0,
+        "mean_particle_count": 127.98894097222222,
+        "n0": 3.453841024438392e+25,
+        "nsamples": 8501,
+        "nx": 120,
+        "ny": 120,
+        "path": "/project/pi_roohie_umass_edu/CavityColdToHotIdentify/JFM_Five_Run_Campaign_20260802/results/run3_dsmc_sensitivity/array_62559252/vhs081_Kn005_U100_N120_ppc128/vhs081_Kn005_U100_N120_ppc128_8seed_mean.csv",
+        "rows": 14400,
+        "schema": "direct-m 2D3V DSMC; required subset audited, extra z/m columns retained",
+        "sha256": "02f011ae6d7cf18a316a31732a745baa53dd3e23feaf4056c6eb394a53f7fb42",
+        "wall_temperature_K": 300.0
+      },
+      "interpolation": {
+        "caveat": "Matched eight-seed VHS (omega=0.81) ensemble mean at Kn=0.05. Comparisons are mapped to a common 160x160 grid; the N120 case requires linear boundary extrapolation at 636 target cell centres.",
+        "linear_boundary_extrapolation_used": true,
+        "normalization": {
+          "R_and_Delta": "number-based fourth moment/(n0*v0^4)",
+          "heat_flux": "qN/(n0*v0^3)",
+          "rho": "n/n0",
+          "stress": "sigmaN/(n0*v0^2)",
+          "temperature": "T/Twall",
+          "velocity": "u/sqrt(k_B*Twall/m_Ar)"
+        },
+        "source_grid": [
+          120,
+          120
+        ],
+        "target_grid": [
+          160,
+          160
+        ],
+        "target_points_outside_source_cell_center_extent": 636,
+        "velocity_scale_m_s": 249.87965747539275
+      },
+      "row": {
+        "PDelta_over_PR": 0.048546527699575036,
+        "active_count": 7155,
+        "af_count": 1211,
+        "f_AF_active": 0.1692522711390636,
+        "f_AF_domain": 0.0473046875,
+        "f_active_domain": 0.2794921875,
+        "mean_IAF_AF": 0.3356688104363848,
+        "mean_chiDelta": 0.08447529979391853,
+        "mean_particle_count": 127.98894097222222,
+        "nsamples": 8501,
+        "source": "/project/pi_roohie_umass_edu/CavityColdToHotIdentify/JFM_Five_Run_Campaign_20260802/results/run3_dsmc_sensitivity/array_62559252/vhs081_Kn005_U100_N120_ppc128/vhs081_Kn005_U100_N120_ppc128_8seed_mean.csv",
+        "source_grid": "120x120"
+      },
+      "thresholds": {
+        "grad_T": 0.03138964521831427,
+        "q": 0.003638189143734911
+      }
+    },
+    {
+      "audit": {
+        "kn": 0.049999999999999996,
+        "lid_velocity_m_s": 100.0,
+        "mean_particle_count": 127.992128125,
+        "n0": 3.453841024438392e+25,
+        "nsamples": 8501,
+        "nx": 200,
+        "ny": 200,
+        "path": "/project/pi_roohie_umass_edu/CavityColdToHotIdentify/JFM_Five_Run_Campaign_20260802/results/run3_dsmc_sensitivity/array_62559252/vhs081_Kn005_U100_N200_ppc128/vhs081_Kn005_U100_N200_ppc128_8seed_mean.csv",
+        "rows": 40000,
+        "schema": "direct-m 2D3V DSMC; required subset audited, extra z/m columns retained",
+        "sha256": "51347c3c71801ac9a63696719fb955b2f486ebb2010d0eb6776688188150aa17",
+        "wall_temperature_K": 300.0
+      },
+      "interpolation": {
+        "caveat": "Matched eight-seed VHS (omega=0.81) ensemble mean at Kn=0.05. Comparisons are mapped to a common 160x160 grid; no boundary extrapolation is used for this case.",
+        "linear_boundary_extrapolation_used": false,
+        "normalization": {
+          "R_and_Delta": "number-based fourth moment/(n0*v0^4)",
+          "heat_flux": "qN/(n0*v0^3)",
+          "rho": "n/n0",
+          "stress": "sigmaN/(n0*v0^2)",
+          "temperature": "T/Twall",
+          "velocity": "u/sqrt(k_B*Twall/m_Ar)"
+        },
+        "source_grid": [
+          200,
+          200
+        ],
+        "target_grid": [
+          160,
+          160
+        ],
+        "target_points_outside_source_cell_center_extent": 0,
+        "velocity_scale_m_s": 249.87965747539275
+      },
+      "row": {
+        "PDelta_over_PR": 0.03811047379249909,
+        "active_count": 6982,
+        "af_count": 1113,
+        "f_AF_active": 0.15940991120022915,
+        "f_AF_domain": 0.0434765625,
+        "f_active_domain": 0.272734375,
+        "mean_IAF_AF": 0.33486453916237113,
+        "mean_chiDelta": 0.052050362231486916,
+        "mean_particle_count": 127.992128125,
+        "nsamples": 8501,
+        "source": "/project/pi_roohie_umass_edu/CavityColdToHotIdentify/JFM_Five_Run_Campaign_20260802/results/run3_dsmc_sensitivity/array_62559252/vhs081_Kn005_U100_N200_ppc128/vhs081_Kn005_U100_N200_ppc128_8seed_mean.csv",
+        "source_grid": "200x200"
+      },
+      "thresholds": {
+        "grad_T": 0.03176750163617625,
+        "q": 0.0035515900540060196
+      }
+    },
+    {
+      "audit": {
+        "kn": 0.049999999999999996,
+        "lid_velocity_m_s": 100.0,
+        "mean_particle_count": 63.988730468750006,
+        "n0": 3.453841024438392e+25,
+        "nsamples": 8501,
+        "nx": 160,
+        "ny": 160,
+        "path": "/project/pi_roohie_umass_edu/CavityColdToHotIdentify/JFM_Five_Run_Campaign_20260802/results/run3_dsmc_sensitivity/array_62559252/vhs081_Kn005_U100_N160_ppc64/vhs081_Kn005_U100_N160_ppc64_8seed_mean.csv",
+        "rows": 25600,
+        "schema": "direct-m 2D3V DSMC; required subset audited, extra z/m columns retained",
+        "sha256": "25ed2423af8efbd5852c6f72dbd1e3005530c6727296fee3a991eff43f9d776e",
+        "wall_temperature_K": 300.0
+      },
+      "interpolation": {
+        "caveat": "Matched eight-seed VHS (omega=0.81) ensemble mean at Kn=0.05. Comparisons are mapped to a common 160x160 grid; no boundary extrapolation is used for this case.",
+        "linear_boundary_extrapolation_used": false,
+        "normalization": {
+          "R_and_Delta": "number-based fourth moment/(n0*v0^4)",
+          "heat_flux": "qN/(n0*v0^3)",
+          "rho": "n/n0",
+          "stress": "sigmaN/(n0*v0^2)",
+          "temperature": "T/Twall",
+          "velocity": "u/sqrt(k_B*Twall/m_Ar)"
+        },
+        "source_grid": [
+          160,
+          160
+        ],
+        "target_grid": [
+          160,
+          160
+        ],
+        "target_points_outside_source_cell_center_extent": 0,
+        "velocity_scale_m_s": 249.87965747539275
+      },
+      "row": {
+        "PDelta_over_PR": 0.048007508512344324,
+        "active_count": 6935,
+        "af_count": 1376,
+        "f_AF_active": 0.1984138428262437,
+        "f_AF_domain": 0.05375,
+        "f_active_domain": 0.2708984375,
+        "mean_IAF_AF": 0.30759832293848716,
+        "mean_chiDelta": 0.1201169405220041,
+        "mean_particle_count": 63.988730468750006,
+        "nsamples": 8501,
+        "source": "/project/pi_roohie_umass_edu/CavityColdToHotIdentify/JFM_Five_Run_Campaign_20260802/results/run3_dsmc_sensitivity/array_62559252/vhs081_Kn005_U100_N160_ppc64/vhs081_Kn005_U100_N160_ppc64_8seed_mean.csv",
+        "source_grid": "160x160"
+      },
+      "thresholds": {
+        "grad_T": 0.03265941946081166,
+        "q": 0.003567629889668529
+      }
+    },
+    {
+      "audit": {
+        "kn": 0.049999999999999996,
+        "lid_velocity_m_s": 100.0,
+        "mean_particle_count": 256.0315625,
+        "n0": 3.453841024438392e+25,
+        "nsamples": 8501,
+        "nx": 160,
+        "ny": 160,
+        "path": "/project/pi_roohie_umass_edu/CavityColdToHotIdentify/JFM_Five_Run_Campaign_20260802/results/run3_dsmc_sensitivity/array_62559252/vhs081_Kn005_U100_N160_ppc256/vhs081_Kn005_U100_N160_ppc256_8seed_mean.csv",
+        "rows": 25600,
+        "schema": "direct-m 2D3V DSMC; required subset audited, extra z/m columns retained",
+        "sha256": "591934620ed6ef6584b9f7caaf8ef6497cce39364776f171250f992a48f7ead9",
+        "wall_temperature_K": 300.0
+      },
+      "interpolation": {
+        "caveat": "Matched eight-seed VHS (omega=0.81) ensemble mean at Kn=0.05. Comparisons are mapped to a common 160x160 grid; no boundary extrapolation is used for this case.",
+        "linear_boundary_extrapolation_used": false,
+        "normalization": {
+          "R_and_Delta": "number-based fourth moment/(n0*v0^4)",
+          "heat_flux": "qN/(n0*v0^3)",
+          "rho": "n/n0",
+          "stress": "sigmaN/(n0*v0^2)",
+          "temperature": "T/Twall",
+          "velocity": "u/sqrt(k_B*Twall/m_Ar)"
+        },
+        "source_grid": [
+          160,
+          160
+        ],
+        "target_grid": [
+          160,
+          160
+        ],
+        "target_points_outside_source_cell_center_extent": 0,
+        "velocity_scale_m_s": 249.87965747539275
+      },
+      "row": {
+        "PDelta_over_PR": 0.041806251701842115,
+        "active_count": 6931,
+        "af_count": 1025,
+        "f_AF_active": 0.14788630789207907,
+        "f_AF_domain": 0.0400390625,
+        "f_active_domain": 0.2707421875,
+        "mean_IAF_AF": 0.3419218789011998,
+        "mean_chiDelta": 0.050376265096553026,
+        "mean_particle_count": 256.0315625,
+        "nsamples": 8501,
+        "source": "/project/pi_roohie_umass_edu/CavityColdToHotIdentify/JFM_Five_Run_Campaign_20260802/results/run3_dsmc_sensitivity/array_62559252/vhs081_Kn005_U100_N160_ppc256/vhs081_Kn005_U100_N160_ppc256_8seed_mean.csv",
+        "source_grid": "160x160"
+      },
+      "thresholds": {
+        "grad_T": 0.031983857114058996,
+        "q": 0.0035867043515828605
+      }
+    }
+  ],
+  "settings": {
+    "activity_fraction": 0.05,
+    "smooth_points": 7,
+    "target_n": 160
+  }
+}
