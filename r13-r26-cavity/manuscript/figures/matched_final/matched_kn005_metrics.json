@@ -1,1 +1,53 @@
-sed: can't read : No such file or directory
+{
+  "contract": {
+    "kn_gu": 0.05,
+    "molecular_model": "VSS transport approximation to IPL Maxwell molecules",
+    "nx": 160,
+    "ppc": 256
+  },
+  "r13_status": {
+    "publication_grade": false,
+    "external_validation_status": "not completed",
+    "fixed_point_residual": 8.308142860495638e-12
+  },
+  "vector": {
+    "R13": {
+      "velocity": {
+        "E": 0.04976209584973464,
+        "C": 0.9987835917278158,
+        "G": 0.9920806604231951,
+        "angle_w_deg": 0.6912331265983238
+      },
+      "heat_flux": {
+        "E": 0.8469058333981043,
+        "C": 0.7921427407807105,
+        "G": 1.379288048532815,
+        "angle_w_deg": 22.52181843959029
+      }
+    },
+    "R26": {
+      "velocity": {
+        "E": 0.01935225475226627,
+        "C": 0.9998383934789095,
+        "G": 1.0070023894646083,
+        "angle_w_deg": 0.318205105049285
+      },
+      "heat_flux": {
+        "E": 0.21208410178508322,
+        "C": 0.9772784847484807,
+        "G": 0.9700050411162396,
+        "angle_w_deg": 6.093935182004482
+      }
+    }
+  },
+  "anti_fourier": {
+    "R13": {
+      "Jaccard": 0.24721355327686134,
+      "Dice": 0.39642537980339587
+    },
+    "R26": {
+      "Jaccard": 0.34355828220858897,
+      "Dice": 0.5114155251141552
+    }
+  }
+}
