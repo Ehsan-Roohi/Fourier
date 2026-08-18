@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import math
 from pathlib import Path
 import subprocess
@@ -44,6 +45,16 @@ class MaxwellContract(unittest.TestCase):
     def test_collision_relevant_sources_are_hash_matched(self) -> None:
         for name, expected in BASELINE_CORE_HASHES.items():
             self.assertEqual(sha256(CODE / name), expected, name)
+
+    def test_driver_manifest_uses_canonical_public_keys(self) -> None:
+        spec = importlib.util.spec_from_file_location("r26_continuation_driver", DRIVER)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        manifest = module.build_source_manifest()
+        for name, expected in BASELINE_CORE_HASHES.items():
+            self.assertEqual(manifest[f"code/{name}"], expected, name)
 
     def test_final_jfm2009_coefficients_are_unchanged(self) -> None:
         c = closure_coefficients("jfm2009")
