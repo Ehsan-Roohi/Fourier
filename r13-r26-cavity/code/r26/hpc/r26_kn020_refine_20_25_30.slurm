@@ -26,7 +26,7 @@ export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
 export OPENBLAS_NUM_THREADS="$OMP_NUM_THREADS"
 export MKL_NUM_THREADS="$OMP_NUM_THREADS"
 
-python3 -m unittest "$PKG/tests/test_maxwell_contract.py"
+(cd "$PKG" && python3 -m unittest discover -s tests -p 'test_maxwell_contract.py')
 
 run_stage () {
   local nodes="$1"
@@ -48,4 +48,3 @@ run_stage 30 "$R26_REFINE_OUT/N25/last_accepted_state.npz"
 sha256sum "$R26_REFINE_OUT/N25/last_accepted_state.npz" \
           "$R26_REFINE_OUT/N30/last_accepted_state.npz" \
   > "$R26_REFINE_OUT/accepted_states.sha256"
-
