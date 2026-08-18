@@ -19,6 +19,13 @@ representation of Maxwell molecules.
 - Each case is rejected unless its Knudsen convention, VSS parameters, grid,
   particle loading, timestep, dump schema, positive density/temperature,
   particle-number balance, completed block series and source commit pass.
+- A short MPI smoke job uses the exact production grid, particle loading and
+  rank count to exercise warm-up, block/final field output, and the first
+  restart checkpoint before the 24-member array is released.  The input
+  validator also rejects every reference to an undefined fix ID.
+- Submission is transactional: a QOS or accounting failure while building the
+  dependency chain cancels any smoke/array/gate jobs already submitted by that
+  bootstrap invocation.
 
 The dependent gate computes ensemble standard errors, split-half drift,
 grid/PPC differences and seed-to-ensemble anti-Fourier Jaccard stability. It
@@ -39,3 +46,6 @@ curl -fsSL https://raw.githubusercontent.com/Ehsan-Roohi/Fourier/main/r13-r26-ca
 The command prints the array job ID, dependent gate job ID and immutable
 campaign directory. Existing results are never overwritten.
 
+For a reviewed branch that has not yet been merged, set `DSMC_GIT_REF` and
+fetch the bootstrap from the same branch.  The cloned commit and requested ref
+are recorded in `SUBMISSION.txt`.
