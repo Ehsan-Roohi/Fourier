@@ -159,6 +159,7 @@ def write_case(
     sample_steps: int = 200_000,
     sample_stride: int = 10,
     checkpoint_steps: int = 40_000,
+    block_steps: int | None = None,
 ) -> dict[str, object]:
     if min(kn_gu, length, nx, ppc, sample_steps, sample_stride) <= 0:
         raise ValueError("Kn, length, grid, PPC, sample steps, and stride must be positive")
@@ -168,10 +169,16 @@ def write_case(
         raise ValueError("sample_steps must be divisible by sample_stride")
     if checkpoint_steps and checkpoint_steps % sample_stride:
         raise ValueError("checkpoint_steps must be divisible by sample_stride")
+    if block_steps is None:
+        block_steps = sample_steps // 10
+    if block_steps <= 0 or sample_steps % block_steps or block_steps % sample_stride:
+        raise ValueError("block steps must divide sample steps and be divisible by stride")
 
     output.mkdir(parents=True, exist_ok=False)
     values = physical_parameters(kn_gu, length, nx, ppc, WALL_TEMPERATURE)
     samples_per_cell = sample_steps // sample_stride
+    samples_per_block = block_steps // sample_stride
+    block_count = sample_steps // block_steps
 
     (output / "argon.species").write_text(
         "# ID molwt(amu) mass(kg) rotdof rotrel vibdof vibrel vibtemp(K) weight charge\n"
@@ -232,8 +239,13 @@ compute              heat eflux/grid all gas heatx heaty
 compute              stress pflux/grid all gas momxx momxy momyy momzz
 # B1ij = <C_i C_j C^2> is the standard raw fourth-order Sonine moment.
 compute              sonine sonine/grid all gas b xx 1 b xy 1 b yy 1 b zz 1
-fix                  fieldavg ave/grid all {sample_stride} 1 {sample_stride} c_flow[*] c_thermal[*] c_heat[*] c_stress[*] c_sonine[*] ave running
-{checkpoint_block}dump                 final grid all {sample_steps} grid.final.* id xc yc f_fieldavg[*]
+# Ten independent production blocks expose sampling drift.  The final fix
+# combines every production sample into one mean; no fitted model is involved.
+fix                  blockavg ave/grid all {sample_stride} {samples_per_block} {block_steps} c_flow[*] c_thermal[*] c_heat[*] c_stress[*] c_sonine[*] ave one
+fix                  finalavg ave/grid all {sample_stride} {samples_per_cell} {sample_steps} c_flow[*] c_thermal[*] c_heat[*] c_stress[*] c_sonine[*] ave one
+dump                 blocks grid all {block_steps} grid.block.* id xc yc f_blockavg[*]
+dump_modify          blocks pad 8
+{checkpoint_block}dump                 final grid all {sample_steps} grid.final.* id xc yc f_finalavg[*]
 dump_modify          final pad 8
 run                  {sample_steps}
 """
@@ -275,11 +287,14 @@ run                  {sample_steps}
         "sample_stride": sample_stride,
         "accumulated_samples_per_cell": samples_per_cell,
         "checkpoint_frequency_steps": checkpoint_steps,
+        "block_steps": block_steps,
+        "block_count": block_count,
+        "samples_per_block_per_cell": samples_per_block,
         "seed": seed,
         "wall_model": "fully diffuse, full thermal accommodation",
         "temperature_observable": "thermal/grid COM-subtracted translational temperature",
         "heat_flux_observable": "eflux/grid COM-subtracted heat-flux density",
-        "dump_schema_version": "maxwell_vss_antifourier_v1_15_fields",
+        "dump_schema_version": "maxwell_vss_antifourier_v2_blocked_15_fields",
         "dump_field_count": len(DUMP_COLUMNS),
         "dump_columns": DUMP_COLUMNS,
         "moment_sampling": {
@@ -297,7 +312,7 @@ run                  {sample_steps}
             "direct_rank3_moment_m_ijk_available": False,
             "full_r26_higher_moment_claim": False,
         },
-        "evidence_level": "single_realisation_model_audit",
+        "evidence_level": "blocked_realisation_for_ensemble_audit",
         **values,
     }
     (output / "case_metadata.json").write_text(
@@ -318,6 +333,7 @@ def main() -> int:
     parser.add_argument("--sample", type=int, default=200_000)
     parser.add_argument("--stride", type=int, default=10)
     parser.add_argument("--checkpoint", type=int, default=40_000)
+    parser.add_argument("--block", type=int, default=None)
     args = parser.parse_args()
     metadata = write_case(
         args.output.resolve(),
@@ -330,6 +346,7 @@ def main() -> int:
         sample_steps=args.sample,
         sample_stride=args.stride,
         checkpoint_steps=args.checkpoint,
+        block_steps=args.block,
     )
     print(json.dumps(metadata, indent=2, sort_keys=True))
     return 0
