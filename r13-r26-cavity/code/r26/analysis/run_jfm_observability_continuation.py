@@ -13,7 +13,7 @@ retained only for regression comparisons and must be selected explicitly.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -296,8 +296,34 @@ def main() -> None:
         action="store_true",
         help="force one nonlinear solve at the restart lid (required after grid refinement)",
     )
+    parser.add_argument(
+        "--grid-reconciliation-homotopy",
+        action="store_true",
+        help=(
+            "replace a direct refined-grid reconciliation by an adaptive shifted-residual "
+            "homotopy F(u)=(1-lambda)F(u_seed), ending at the unchanged physical system"
+        ),
+    )
+    parser.add_argument("--homotopy-initial-step", type=float, default=0.20)
+    parser.add_argument("--homotopy-minimum-step", type=float, default=0.0125)
+    parser.add_argument("--homotopy-growth", type=float, default=1.5)
+    parser.add_argument(
+        "--reconciliation-fallback-solver",
+        action="append",
+        choices=("colored_newton", "least_squares", "krylov"),
+        default=[],
+        help="solver to try after the primary solver at a rejected homotopy stage",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
+    if not (0.0 < args.homotopy_initial_step <= 1.0):
+        parser.error("homotopy initial step must lie in (0,1]")
+    if not (0.0 < args.homotopy_minimum_step <= args.homotopy_initial_step):
+        parser.error("homotopy minimum step must lie in (0, initial step]")
+    if args.homotopy_growth <= 1.0:
+        parser.error("homotopy growth must exceed one")
+    if args.grid_reconciliation_homotopy and args.initial_state is None:
+        parser.error("grid reconciliation homotopy requires an explicit accepted restart")
     if args.case_family == "jfm-maxwell":
         if args.kn_gu is None or args.kn_rana is not None:
             parser.error("jfm-maxwell requires --kn-gu and forbids --kn-rana")
@@ -434,13 +460,29 @@ def main() -> None:
     )
     attempts: list[dict[str, object]] = []
     step = float(args.initial_step)
+    homotopy_parameter = 0.0
+    homotopy_step = float(args.homotopy_initial_step)
+    homotopy_reference_residual: np.ndarray | None = None
+    homotopy_solver_order = list(
+        dict.fromkeys([args.solver, *args.reconciliation_fallback_solver])
+    )
     attempt = 0
     termination = "not_started"
     while needs_reconciliation or current_lid < target_lid - 1.0e-15:
         attempt += 1
         reconciling_this_attempt = needs_reconciliation
+        homotopy_target: float | None = None
+        residual_offset: np.ndarray | None = None
         if reconciling_this_attempt:
             proposed = current_lid
+            if args.grid_reconciliation_homotopy:
+                if homotopy_reference_residual is None:
+                    reference_case = base.with_lid_velocity(
+                        current_lid, suffix="grid-homotopy-reference"
+                    )
+                    homotopy_reference_residual = make_problem(reference_case).residual(state)
+                homotopy_target = min(1.0, homotopy_parameter + homotopy_step)
+                residual_offset = (1.0 - homotopy_target) * homotopy_reference_residual
         elif attempt == 1 and current_lid == 0.0:
             proposed = min(args.smoke_lid, target_lid)
         else:
@@ -448,14 +490,55 @@ def main() -> None:
         case = base.with_lid_velocity(proposed, suffix=f"attempt{attempt:03d}")
         problem = make_problem(case)
         started = time.time()
-        result = solve_r26_bvp(problem, state, options=options)
+        solver_methods = (
+            homotopy_solver_order
+            if reconciling_this_attempt and args.grid_reconciliation_homotopy
+            else [args.solver]
+        )
+        solver_seed = state
+        solver_results = []
+        solver_trials: list[dict[str, object]] = []
+        for method in solver_methods:
+            candidate = solve_r26_bvp(
+                problem,
+                solver_seed,
+                options=replace(options, method=method),
+                residual_offset=residual_offset,
+            )
+            solver_results.append(candidate)
+            solver_trials.append(
+                {
+                    "method": method,
+                    "scipy_success": candidate.scipy_success,
+                    "objective_converged": candidate.objective_converged,
+                    "objective_linf": candidate.objective_linf,
+                    "residual_offset_linf": candidate.residual_offset_linf,
+                    "message": candidate.message,
+                    "function_evaluations": candidate.function_evaluations,
+                    "invalid_evaluations": candidate.invalid_evaluations,
+                    "last_invalid_error": candidate.last_invalid_error,
+                }
+            )
+            if candidate.scipy_success and candidate.objective_converged:
+                break
+            solver_seed = candidate.state
+        passing_results = [
+            candidate
+            for candidate in solver_results
+            if candidate.scipy_success and candidate.objective_converged
+        ]
+        result = (
+            passing_results[0]
+            if passing_results
+            else min(solver_results, key=lambda candidate: candidate.objective_linf)
+        )
         balances = global_balance_diagnostics(result.state, case)
         raw_gate = max(
             result.diagnostics.raw_total_linf,
             abs(result.diagnostics.held_out_continuity),
             abs(result.diagnostics.mass_error),
         )
-        accepted = bool(
+        physical_root_accepted = bool(
             result.converged
             and result.scipy_success
             and raw_gate <= args.raw_tolerance
@@ -465,11 +548,26 @@ def main() -> None:
             and balances["momentum_boundary_flux_linf"] <= 10.0 * args.raw_tolerance
             and abs(balances["internal_energy_balance_error"]) <= 10.0 * args.raw_tolerance
         )
+        if reconciling_this_attempt and homotopy_target is not None and homotopy_target < 1.0:
+            accepted = bool(
+                result.objective_converged
+                and result.scipy_success
+                and result.diagnostics.min_density > 0.0
+                and result.diagnostics.min_temperature > 0.0
+                and balances["wall_effective_pressure_min"] > 0.0
+            )
+        else:
+            accepted = physical_root_accepted
         report: dict[str, object] = {
             "attempt": attempt,
             "from_lid": current_lid,
             "proposed_lid": proposed,
             "accepted": accepted,
+            "physical_root_accepted": physical_root_accepted,
+            "grid_homotopy_parameter": homotopy_target,
+            "grid_homotopy_step": (
+                homotopy_step if homotopy_target is not None else None
+            ),
             "elapsed_seconds": time.time() - started,
             "solver": {
                 "method": result.solver_method,
@@ -478,7 +576,11 @@ def main() -> None:
                 "function_evaluations": result.function_evaluations,
                 "invalid_evaluations": result.invalid_evaluations,
                 "last_invalid_error": result.last_invalid_error,
+                "objective_converged": result.objective_converged,
+                "objective_linf": result.objective_linf,
+                "residual_offset_linf": result.residual_offset_linf,
             },
+            "solver_trials": solver_trials,
             "diagnostics": asdict(result.diagnostics),
             "raw_acceptance_gate": raw_gate,
             "global_balances": balances,
@@ -490,6 +592,8 @@ def main() -> None:
             "source_manifest": manifest,
         }
         stem = f"attempt_{attempt:03d}_lid_{proposed:.12g}"
+        if homotopy_target is not None:
+            stem += f"_homotopy_{homotopy_target:.12g}"
         np.savez_compressed(
             args.output_dir / f"{stem}.npz",
             state=result.state,
@@ -500,23 +604,41 @@ def main() -> None:
             kn_convention=case.kn_convention.value,
             mu_equilibrium=case.mu_equilibrium,
             beta=case.grid_stretch_beta,
-            accepted=accepted,
+            accepted=physical_root_accepted,
+            homotopy_stage_accepted=accepted,
+            homotopy_parameter=(
+                -1.0 if homotopy_target is None else homotopy_target
+            ),
         )
         write_json(args.output_dir / f"{stem}.json", report)
         attempts.append(report)
         if accepted:
             state = result.state.copy()
             current_lid = proposed
-            state_accepted_on_target_grid = True
             if reconciling_this_attempt:
-                needs_reconciliation = False
+                if homotopy_target is None or homotopy_target >= 1.0:
+                    needs_reconciliation = False
+                    state_accepted_on_target_grid = physical_root_accepted
+                    homotopy_parameter = 1.0
+                else:
+                    homotopy_parameter = homotopy_target
+                    homotopy_step = min(
+                        1.0 - homotopy_parameter,
+                        args.homotopy_initial_step,
+                        args.homotopy_growth * homotopy_step,
+                    )
             elif attempt > 1:
+                state_accepted_on_target_grid = True
                 step = min(args.initial_step, 1.4 * step)
             if not needs_reconciliation and current_lid >= target_lid - 1.0e-15:
                 termination = "target_accepted"
                 break
         else:
             if reconciling_this_attempt:
+                if homotopy_target is not None:
+                    homotopy_step *= 0.5
+                    if homotopy_step >= args.homotopy_minimum_step:
+                        continue
                 termination = "grid_reconciliation_rejected"
                 break
             if current_lid == 0.0 and proposed == min(args.smoke_lid, target_lid):
@@ -565,6 +687,24 @@ def main() -> None:
             "provenance": base.provenance,
         },
         "input_provenance": provenance,
+        "grid_reconciliation": {
+            "homotopy_enabled": bool(args.grid_reconciliation_homotopy),
+            "last_accepted_homotopy_parameter": homotopy_parameter,
+            "last_attempted_homotopy_step": homotopy_step,
+            "minimum_homotopy_step": args.homotopy_minimum_step,
+            "solver_order": homotopy_solver_order,
+            "reference_residual_linf": (
+                None
+                if homotopy_reference_residual is None
+                else float(
+                    np.max(np.abs(homotopy_reference_residual), initial=0.0)
+                )
+            ),
+            "semantics": (
+                "intermediate shifted-residual roots are numerical path states only; "
+                "only lambda=1 solves the unchanged physical R26 equations"
+            ),
+        },
         "termination": termination,
         "attempts": attempts,
         "validation_status": (
@@ -602,6 +742,21 @@ def main() -> None:
             beta=base.grid_stretch_beta,
             accepted=False,
         )
+        if homotopy_parameter > 0.0:
+            np.savez_compressed(
+                args.output_dir / "last_homotopy_stage.npz",
+                state=state,
+                x=base.x,
+                y=base.y,
+                lid_velocity=current_lid,
+                kn_input=base.kn,
+                kn_convention=base.kn_convention.value,
+                mu_equilibrium=base.mu_equilibrium,
+                beta=base.grid_stretch_beta,
+                accepted=False,
+                homotopy_stage_accepted=True,
+                homotopy_parameter=homotopy_parameter,
+            )
     write_json(args.output_dir / "run_summary.json", final_payload)
     print(
         json.dumps(
