@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -79,6 +80,20 @@ def validate(case: Path, args: argparse.Namespace) -> dict[str, object]:
                   "f_blockavg[*]", "f_finalavg[*]"):
         require(token in deck, f"input-deck contract missing {token!r}")
 
+    # Fail before the expensive DSMC run if a dump references a fix that the
+    # generated input deck never defined.  The previous checkpoint dump used
+    # ``f_fieldavg[*]`` without a matching ``fix fieldavg`` and reached a
+    # SPARTA memory fault only at the first production checkpoint.
+    fix_ids = {
+        fields[1]
+        for line in deck.splitlines()
+        if (fields := line.split()) and fields[0] == "fix" and len(fields) > 1
+    }
+    referenced_fix_ids = set(re.findall(r"\bf_([A-Za-z0-9_]+)\[", deck))
+    undefined_fix_ids = sorted(referenced_fix_ids - fix_ids)
+    require(not undefined_fix_ids,
+            f"input deck references undefined fix IDs: {undefined_fix_ids}")
+
     if not args.require_final:
         return {"status": "generated_case_pass", "case": str(case)}
 
@@ -131,4 +146,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
