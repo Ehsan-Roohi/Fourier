@@ -50,7 +50,10 @@ from r26_wall_conditions import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CODE = ROOT / "code"
+# The archived campaign used source/r26/code/*.py, whereas the public GitHub
+# package keeps the modules directly in code/r26/*.py.  Resolve both layouts
+# but emit one canonical manifest schema so validation is path-independent.
+CODE = ROOT / "code" if (ROOT / "code" / "r26_cases.py").is_file() else ROOT
 SOURCE_FILES = tuple(sorted(CODE.glob("r26_*.py"))) + (Path(__file__).resolve(),)
 RANA_JOHN_LID = 50.0 / np.sqrt(208.0 * 273.0)
 GU_ASME_DEFAULT_LID = 10.0 / np.sqrt(208.0 * 273.0)
@@ -62,6 +65,19 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def build_source_manifest() -> dict[str, str]:
+    manifest: dict[str, str] = {}
+    for path in SOURCE_FILES:
+        if path.parent == CODE:
+            key = f"code/{path.name}"
+        elif path == Path(__file__).resolve():
+            key = f"analysis/{path.name}"
+        else:  # pragma: no cover - defensive future layout
+            key = str(path.relative_to(ROOT))
+        manifest[key] = sha256_file(path)
+    return manifest
 
 
 def state_sha256(state: np.ndarray) -> str:
@@ -401,7 +417,7 @@ def main() -> None:
     if current_lid > target_lid + 1.0e-15:
         parser.error("restart lid exceeds the requested target lid")
 
-    manifest = {str(path.relative_to(ROOT)): sha256_file(path) for path in SOURCE_FILES}
+    manifest = build_source_manifest()
     solver_tolerance = (
         0.1 * args.raw_tolerance
         if args.solver_tolerance is None
