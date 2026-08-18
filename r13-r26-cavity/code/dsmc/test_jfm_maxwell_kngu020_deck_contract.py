@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from validate_jfm_maxwell_kngu020_ensemble_case import production_dump_paths
+
 
 HERE = Path(__file__).resolve().parent
 GENERATOR = HERE / "generate_jfm_maxwell_kngu020_case.py"
@@ -81,6 +83,22 @@ class GeneratedDeckContractTest(unittest.TestCase):
             )
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("undefined fix IDs", completed.stderr + completed.stdout)
+
+    def test_step_zero_dump_is_not_counted_as_production(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            case = Path(temporary)
+            for name in (
+                "grid.block.00000000",
+                "grid.block.00002000",
+                "grid.final.00000000",
+                "grid.final.00002000",
+            ):
+                (case / name).write_text("placeholder\n", encoding="utf-8")
+
+            blocks = production_dump_paths(case, "grid.block.", [2000])
+            final = production_dump_paths(case, "grid.final.", [2000])
+            self.assertEqual([path.name for path in blocks], ["grid.block.00002000"])
+            self.assertEqual([path.name for path in final], ["grid.final.00002000"])
 
 
 if __name__ == "__main__":
