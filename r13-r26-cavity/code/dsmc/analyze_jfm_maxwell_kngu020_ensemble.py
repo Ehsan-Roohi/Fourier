@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +30,23 @@ DESIGNS = {
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(f"MAXWELL_ENSEMBLE_ANALYSIS_FAILED: {message}")
+
+
+def production_dump_paths(path: Path, stem: str, expected_steps: list[int]) -> list[Path]:
+    """Select exact positive production timesteps and ignore SPARTA step zero."""
+
+    by_step: dict[int, Path] = {}
+    for dump in sorted(path.glob(f"{stem}*")):
+        match = re.search(r"(\d+)$", dump.name)
+        require(match is not None, f"unparseable dump timestep: {dump}")
+        step = int(match.group(1))
+        require(step not in by_step, f"duplicate {stem} dump at timestep {step}: {path}")
+        by_step[step] = dump
+    expected = set(expected_steps)
+    actual_production = {step for step in by_step if step > 0}
+    require(actual_production == expected,
+            f"{stem} production timesteps {sorted(actual_production)} != {sorted(expected)}: {path}")
+    return [by_step[step] for step in expected_steps]
 
 
 def dump_values(path: Path, nx: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -104,9 +122,14 @@ def load_run(path: Path, nx: int) -> dict[str, object]:
     meta = json.loads((path / "case_metadata.json").read_text(encoding="utf-8"))
     require(json.loads((path / "validation_report.json").read_text(encoding="utf-8"))["status"] ==
             "MAXWELL_ENSEMBLE_VALIDATION_PASS", f"validator did not pass: {path}")
-    final, x, y = dump_values(next(path.glob("grid.final.*")), nx)
-    blocks = [dump_values(p, nx)[0] for p in sorted(path.glob("grid.block.*"))]
-    require(len(blocks) == 10, f"expected ten blocks: {path}")
+    sample_steps = int(meta["sample_steps"])
+    block_steps = int(meta["block_steps"])
+    expected_block_steps = list(range(block_steps, sample_steps + 1, block_steps))
+    final_path = production_dump_paths(path, "grid.final.", [sample_steps])[0]
+    block_paths = production_dump_paths(path, "grid.block.", expected_block_steps)
+    final, x, y = dump_values(final_path, nx)
+    blocks = [dump_values(dump, nx)[0] for dump in block_paths]
+    require(len(blocks) == int(meta["block_count"]), f"wrong production block count: {path}")
     return {"path": path, "meta": meta, "x": x, "y": y,
             "final": nondimensional(final, meta),
             "blocks": np.stack([nondimensional(b, meta) for b in blocks])}
