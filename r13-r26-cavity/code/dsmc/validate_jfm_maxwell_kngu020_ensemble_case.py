@@ -22,6 +22,41 @@ def require(condition: bool, message: str) -> None:
         raise SystemExit(f"MAXWELL_ENSEMBLE_VALIDATION_FAILED: {message}")
 
 
+def production_dump_paths(
+    case: Path,
+    stem: str,
+    expected_steps: list[int],
+) -> list[Path]:
+    """Return only the declared production dumps in deterministic step order.
+
+    SPARTA writes one dump at the current timestep when a dump is defined.  In
+    this campaign that creates a timestep-zero snapshot before ``fix ave/grid``
+    has accumulated a production sample.  It is a diagnostic initialization
+    artifact, not an independent block or the final production mean.
+    """
+
+    by_step: dict[int, Path] = {}
+    for path in sorted(case.glob(f"{stem}*")):
+        match = re.search(r"(\d+)$", path.name)
+        require(match is not None, f"unparseable dump timestep: {path.name}")
+        step = int(match.group(1))
+        require(step not in by_step, f"duplicate {stem} dump at timestep {step}")
+        by_step[step] = path
+
+    expected = set(expected_steps)
+    actual_production = {step for step in by_step if step > 0}
+    require(
+        actual_production == expected,
+        f"{stem} production timesteps {sorted(actual_production)} != {sorted(expected)}",
+    )
+    unexpected_nonproduction = set(by_step) - expected - {0}
+    require(
+        not unexpected_nonproduction,
+        f"unexpected {stem} timesteps: {sorted(unexpected_nonproduction)}",
+    )
+    return [by_step[step] for step in expected_steps]
+
+
 def read_dump(path: Path, nx: int, fix_id: str) -> np.ndarray:
     require(path.is_file() and path.stat().st_size > 0, f"missing dump {path.name}")
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -97,12 +132,11 @@ def validate(case: Path, args: argparse.Namespace) -> dict[str, object]:
     if not args.require_final:
         return {"status": "generated_case_pass", "case": str(case)}
 
-    blocks = sorted(case.glob("grid.block.*"))
-    require(len(blocks) == args.sample // args.block, "incomplete independent block series")
+    expected_block_steps = list(range(args.block, args.sample + 1, args.block))
+    blocks = production_dump_paths(case, "grid.block.", expected_block_steps)
     for block in blocks:
         read_dump(block, args.nx, "blockavg")
-    finals = sorted(case.glob("grid.final.*"))
-    require(len(finals) == 1, "expected exactly one final production mean")
+    finals = production_dump_paths(case, "grid.final.", [args.sample])
     final = read_dump(finals[0], args.nx, "finalavg")
 
     target_nrho = float(meta["number_density_m-3"])
@@ -119,6 +153,11 @@ def validate(case: Path, args: argparse.Namespace) -> dict[str, object]:
         "ppc": args.ppc,
         "seed": args.seed,
         "blocks": len(blocks),
+        "ignored_initialization_dumps": [
+            name
+            for name in ("grid.block.00000000", "grid.final.00000000")
+            if (case / name).is_file()
+        ],
         "samples_per_cell": args.sample // args.stride,
         "domain_mean_density_relative_error": mass_error,
         "final_dump": finals[0].name,
