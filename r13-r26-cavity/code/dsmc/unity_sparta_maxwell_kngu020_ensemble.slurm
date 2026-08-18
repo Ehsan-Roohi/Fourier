@@ -19,10 +19,10 @@ SPARTA_BIN="${SPARTA_BIN:?SPARTA_BIN is required}"
 CODE_DIR="${REPO_ROOT}/r13-r26-cavity/code/dsmc"
 EXPECTED_SPARTA_COMMIT="912c9e163c38ea5c3562d039e65215f6e2a4f3f8"
 OPENMPI_MODULE="${UNITY_OPENMPI_MODULE:-openmpi/5.0.3}"
-WARMUP=200000
-SAMPLE=2000000
-STRIDE=100
-BLOCK=200000
+WARMUP="${DSMC_WARMUP:-200000}"
+SAMPLE="${DSMC_SAMPLE:-2000000}"
+STRIDE="${DSMC_STRIDE:-100}"
+BLOCK="${DSMC_BLOCK:-200000}"
 SEEDS=(104729 130363 155921 196613 242081 32452843 49979687 67867967)
 
 TASK="${SLURM_ARRAY_TASK_ID:?This file must be submitted as an array job}"
@@ -115,4 +115,3 @@ python3 "$CODE_DIR/validate_jfm_maxwell_kngu020_ensemble_case.py" "$RUN_DIR" \
 sha256sum case_metadata.json in.cavity maxwell.vss grid.final.* grid.block.* \
   > FILES.sha256
 echo "COMPLETE: $RUN_DIR"
-

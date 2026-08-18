@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +20,41 @@ FIELDS = ["nrho", "u", "v", "w", "T", "qx", "qy", "Pxx", "Pxy",
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise SystemExit(f"MAXWELL_ENSEMBLE_VALIDATION_FAILED: {message}")
+
+
+def production_dump_paths(
+    case: Path,
+    stem: str,
+    expected_steps: list[int],
+) -> list[Path]:
+    """Return only the declared production dumps in deterministic step order.
+
+    SPARTA writes one dump at the current timestep when a dump is defined.  In
+    this campaign that creates a timestep-zero snapshot before ``fix ave/grid``
+    has accumulated a production sample.  It is a diagnostic initialization
+    artifact, not an independent block or the final production mean.
+    """
+
+    by_step: dict[int, Path] = {}
+    for path in sorted(case.glob(f"{stem}*")):
+        match = re.search(r"(\d+)$", path.name)
+        require(match is not None, f"unparseable dump timestep: {path.name}")
+        step = int(match.group(1))
+        require(step not in by_step, f"duplicate {stem} dump at timestep {step}")
+        by_step[step] = path
+
+    expected = set(expected_steps)
+    actual_production = {step for step in by_step if step > 0}
+    require(
+        actual_production == expected,
+        f"{stem} production timesteps {sorted(actual_production)} != {sorted(expected)}",
+    )
+    unexpected_nonproduction = set(by_step) - expected - {0}
+    require(
+        not unexpected_nonproduction,
+        f"unexpected {stem} timesteps: {sorted(unexpected_nonproduction)}",
+    )
+    return [by_step[step] for step in expected_steps]
 
 
 def read_dump(path: Path, nx: int, fix_id: str) -> np.ndarray:
@@ -79,15 +115,28 @@ def validate(case: Path, args: argparse.Namespace) -> dict[str, object]:
                   "f_blockavg[*]", "f_finalavg[*]"):
         require(token in deck, f"input-deck contract missing {token!r}")
 
+    # Fail before the expensive DSMC run if a dump references a fix that the
+    # generated input deck never defined.  The previous checkpoint dump used
+    # ``f_fieldavg[*]`` without a matching ``fix fieldavg`` and reached a
+    # SPARTA memory fault only at the first production checkpoint.
+    fix_ids = {
+        fields[1]
+        for line in deck.splitlines()
+        if (fields := line.split()) and fields[0] == "fix" and len(fields) > 1
+    }
+    referenced_fix_ids = set(re.findall(r"\bf_([A-Za-z0-9_]+)\[", deck))
+    undefined_fix_ids = sorted(referenced_fix_ids - fix_ids)
+    require(not undefined_fix_ids,
+            f"input deck references undefined fix IDs: {undefined_fix_ids}")
+
     if not args.require_final:
         return {"status": "generated_case_pass", "case": str(case)}
 
-    blocks = sorted(case.glob("grid.block.*"))
-    require(len(blocks) == args.sample // args.block, "incomplete independent block series")
+    expected_block_steps = list(range(args.block, args.sample + 1, args.block))
+    blocks = production_dump_paths(case, "grid.block.", expected_block_steps)
     for block in blocks:
         read_dump(block, args.nx, "blockavg")
-    finals = sorted(case.glob("grid.final.*"))
-    require(len(finals) == 1, "expected exactly one final production mean")
+    finals = production_dump_paths(case, "grid.final.", [args.sample])
     final = read_dump(finals[0], args.nx, "finalavg")
 
     target_nrho = float(meta["number_density_m-3"])
@@ -104,6 +153,11 @@ def validate(case: Path, args: argparse.Namespace) -> dict[str, object]:
         "ppc": args.ppc,
         "seed": args.seed,
         "blocks": len(blocks),
+        "ignored_initialization_dumps": [
+            name
+            for name in ("grid.block.00000000", "grid.final.00000000")
+            if (case / name).is_file()
+        ],
         "samples_per_cell": args.sample // args.stride,
         "domain_mean_density_relative_error": mass_error,
         "final_dump": finals[0].name,
@@ -131,4 +185,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
