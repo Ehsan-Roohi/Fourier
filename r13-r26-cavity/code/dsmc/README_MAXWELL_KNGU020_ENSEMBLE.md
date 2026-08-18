@@ -19,6 +19,9 @@ representation of Maxwell molecules.
 - Each case is rejected unless its Knudsen convention, VSS parameters, grid,
   particle loading, timestep, dump schema, positive density/temperature,
   particle-number balance, completed block series and source commit pass.
+- SPARTA's timestep-zero initialization dumps are retained for provenance but
+  are explicitly excluded from production-block and final-mean statistics;
+  the validator requires the exact positive production-timestep sequence.
 - A short MPI smoke job uses the exact production grid, particle loading and
   rank count to exercise warm-up, block/final field output, and the first
   restart checkpoint before the 24-member array is released.  The input
