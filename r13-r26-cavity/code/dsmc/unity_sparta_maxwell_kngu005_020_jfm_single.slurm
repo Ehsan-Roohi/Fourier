@@ -76,7 +76,7 @@ python3 "${ROOT_DIR}/scripts/validate_jfm_maxwell_kngu_case.py" \
   printf 'kn_gu=%s\n' "${KN_GU}"
   printf 'collision_model=Maxwell-VSS_omega1_alpha2.140\n'
   printf 'configuration=KnGu%s_N160_ppc256_warmup40000_samples_per_cell20000_stride10\n' "${KN_TAG}"
-  printf 'dump_schema=maxwell_vss_antifourier_v1_15_fields\n'
+  printf 'dump_schema=maxwell_vss_antifourier_v2_blocked_15_fields\n'
   printf 'hostname=%s\n' "$(hostname)"
   printf 'slurm_ntasks=%s\n' "${SLURM_NTASKS}"
   printf 'openmpi_module=%s\n' "${OPENMPI_MODULE}"
@@ -126,8 +126,8 @@ mv -- log.sparta log.cavity
 python3 "${ROOT_DIR}/scripts/validate_jfm_maxwell_kngu_case.py" \
   "${RUN_DIR}" --kn-gu "${KN_GU}" --require-final
 if [[ ! -s "${RUN_DIR}/${FINAL_DUMP_NAME}" ]] || \
-   ! grep -Fq 'f_fieldavg[15]' "${RUN_DIR}/${FINAL_DUMP_NAME}" || \
-   grep -Fq 'f_fieldavg[16]' "${RUN_DIR}/${FINAL_DUMP_NAME}"; then
+   ! grep -Fq 'f_finalavg[15]' "${RUN_DIR}/${FINAL_DUMP_NAME}" || \
+   grep -Fq 'f_finalavg[16]' "${RUN_DIR}/${FINAL_DUMP_NAME}"; then
   echo "SPARTA ended without the required 15-field final dump." >&2
   exit 9
 fi
