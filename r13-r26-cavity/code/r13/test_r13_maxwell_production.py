@@ -12,12 +12,7 @@ from pathlib import Path
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
-LEGACY = (
-    ROOT
-    / "work/article_final_v2/data/kn020_models/r13_N60"
-    / "rana_original_coefficients.py"
-)
+LEGACY = HERE / "rana_original_coefficients.py"
 sys.path.insert(0, str(HERE))
 
 from r13_maxwell_production import (  # noqa: E402
