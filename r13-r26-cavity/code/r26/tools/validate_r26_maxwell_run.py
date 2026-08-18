@@ -70,6 +70,28 @@ def main() -> None:
     require(bool(attempts), "no nonlinear attempt recorded")
     final = attempts[-1]
     require(bool(final.get("accepted")), "last nonlinear attempt rejected")
+    reconciliation = summary.get("grid_reconciliation", {})
+    if reconciliation.get("homotopy_enabled"):
+        require(
+            math.isclose(
+                float(reconciliation.get("last_accepted_homotopy_parameter")),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=2.0e-15,
+            ),
+            "grid homotopy did not reach the physical lambda=1 system",
+        )
+        for attempt in attempts:
+            parameter = attempt.get("grid_homotopy_parameter")
+            if parameter is not None and float(parameter) < 1.0:
+                require(
+                    not bool(attempt.get("physical_root_accepted")),
+                    "intermediate homotopy state was promoted as a physical root",
+                )
+        require(
+            float(final.get("solver", {}).get("residual_offset_linf", 0.0)) == 0.0,
+            "final accepted solve retained a nonzero homotopy residual offset",
+        )
     require(float(final.get("raw_acceptance_gate")) <= args.raw_tolerance, "raw residual gate failed")
     diagnostic = final.get("diagnostics", {})
     require(float(diagnostic.get("min_density")) > 0.0, "non-positive density")

@@ -315,3 +315,32 @@ def test_colored_newton_uses_absolute_fd_floor_for_small_moments() -> None:
     assert captured["abs_step"] is not None
     assert captured["abs_step"].shape == (problem.unknown_count,)
     assert np.min(captured["abs_step"]) >= 2.0e-6
+
+
+def test_shifted_residual_homotopy_has_exact_anchor_without_promoting_it() -> None:
+    """The interpolated seed is an exact lambda=0 path state, not an R26 root."""
+
+    problem = _problem(nodes=5)
+    state = problem.case.equilibrium_state()
+    state[2, 2, 1] = 0.05
+    offset = problem.residual(state)
+    assert np.max(np.abs(offset)) > 0.0
+
+    result = solve_r26_bvp(
+        problem,
+        state,
+        options=SolveOptions(
+            method="colored_newton",
+            residual_tolerance=1.0e-12,
+            held_out_continuity_tolerance=1.0e-12,
+            max_iterations=2,
+        ),
+        residual_offset=offset,
+    )
+
+    assert result.scipy_success
+    assert result.objective_converged
+    assert result.objective_linf == 0.0
+    assert result.residual_offset_linf > 0.0
+    assert not result.converged
+    assert np.array_equal(result.state, state)

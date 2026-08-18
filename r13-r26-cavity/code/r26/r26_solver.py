@@ -98,22 +98,38 @@ class R26SolveResult:
     invalid_evaluations: int
     last_invalid_error: str | None
     solver_method: str
+    objective_linf: float
+    objective_converged: bool
+    residual_offset_linf: float
 
 
 class EncodedR26Objective:
     """Pure vector objective plus a finite guard for rejected line-search steps."""
 
-    def __init__(self, problem: R26NodeBVP, transform: LogStateTransform, penalty: float) -> None:
+    def __init__(
+        self,
+        problem: R26NodeBVP,
+        transform: LogStateTransform,
+        penalty: float,
+        residual_offset: np.ndarray | None = None,
+    ) -> None:
         self.problem = problem
         self.transform = transform
         self.penalty = float(penalty)
+        if residual_offset is None:
+            self.residual_offset = np.zeros(problem.unknown_count, dtype=float)
+        else:
+            offset = np.asarray(residual_offset, dtype=float)
+            if offset.shape != (problem.unknown_count,) or not np.isfinite(offset).all():
+                raise ValueError("residual offset must be one finite full BVP vector")
+            self.residual_offset = offset.copy()
         self.invalid_evaluations = 0
         self.last_invalid_error: str | None = None
 
     def __call__(self, vector: np.ndarray) -> np.ndarray:
         try:
             state = self.transform.decode(vector)
-            return self.problem.residual(state)
+            return self.problem.residual(state) - self.residual_offset
         except (FloatingPointError, ValueError, OverflowError) as exc:
             self.invalid_evaluations += 1
             self.last_invalid_error = f"{type(exc).__name__}: {exc}"
@@ -336,6 +352,7 @@ def solve_r26_bvp(
     initial_state: np.ndarray,
     *,
     options: SolveOptions | None = None,
+    residual_offset: np.ndarray | None = None,
 ) -> R26SolveResult:
     """Solve one fixed case from one explicit initial state.
 
@@ -347,7 +364,12 @@ def solve_r26_bvp(
     options = SolveOptions() if options is None else options
     transform = LogStateTransform(problem.shape)
     x0 = transform.encode(initial_state)
-    objective = EncodedR26Objective(problem, transform, options.invalid_penalty)
+    objective = EncodedR26Objective(
+        problem,
+        transform,
+        options.invalid_penalty,
+        residual_offset=residual_offset,
+    )
 
     if options.method == "krylov":
         scipy_result: OptimizeResult = root(
@@ -492,20 +514,37 @@ def solve_r26_bvp(
         state = transform.decode(encoded)
         evaluation = problem.evaluate(state)
         diagnostics = evaluation.diagnostics
+        objective_residual = evaluation.flat - objective.residual_offset
+        objective_linf = float(np.max(np.abs(objective_residual), initial=0.0))
         physical_final = True
     except (FloatingPointError, ValueError) as exc:
         state = np.asarray(initial_state, dtype=float).copy()
-        diagnostics = problem.evaluate(state).diagnostics
+        fallback_evaluation = problem.evaluate(state)
+        diagnostics = fallback_evaluation.diagnostics
+        objective_residual = fallback_evaluation.flat - objective.residual_offset
+        objective_linf = float(np.max(np.abs(objective_residual), initial=0.0))
         physical_final = False
         objective.last_invalid_error = f"final state invalid: {type(exc).__name__}: {exc}"
 
+    residual_offset_linf = float(
+        np.max(np.abs(objective.residual_offset), initial=0.0)
+    )
+    objective_converged = bool(
+        physical_final and objective_linf <= options.residual_tolerance
+    )
     converged = bool(
-        physical_final
-        and diagnostics.total_linf <= options.residual_tolerance
+        objective_converged
+        and residual_offset_linf == 0.0
         and abs(diagnostics.held_out_continuity) <= options.held_out_continuity_tolerance
     )
     message = str(getattr(scipy_result, "message", ""))
-    if bool(getattr(scipy_result, "success", False)) and not converged:
+    if (
+        bool(getattr(scipy_result, "success", False))
+        and residual_offset_linf > 0.0
+        and objective_converged
+    ):
+        message += "; shifted-residual homotopy stage converged (not a physical root)"
+    elif bool(getattr(scipy_result, "success", False)) and not converged:
         message += (
             "; optimizer stopped but strict R26 acceptance failed "
             f"(residual={diagnostics.total_linf:.3e}, "
@@ -524,6 +563,9 @@ def solve_r26_bvp(
         invalid_evaluations=objective.invalid_evaluations,
         last_invalid_error=objective.last_invalid_error,
         solver_method=options.method,
+        objective_linf=objective_linf,
+        objective_converged=objective_converged,
+        residual_offset_linf=residual_offset_linf,
     )
 
 
