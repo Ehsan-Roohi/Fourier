@@ -21,8 +21,7 @@ from r13_maxwell_production import STATE_ORDER_SOLVER, production_maxwell
 
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
-SOURCE_DIR = ROOT / "work/article_final_v2/data/kn020_models/r13_N60"
+SOURCE_DIR = HERE
 COEFFICIENT_PATH = SOURCE_DIR / "rana_original_coefficients.py"
 SOLVER_PATH = SOURCE_DIR / "rana_original_reference_solver.py"
 
@@ -123,4 +122,3 @@ def install_candidate(solver: ModuleType) -> dict[str, object]:
         "installed_production_module": production_maxwell.__module__,
         "candidate_status": "not-run-ready; coefficient/integration tests only",
     }
-
