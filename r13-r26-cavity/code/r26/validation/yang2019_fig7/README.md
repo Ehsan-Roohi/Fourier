@@ -58,3 +58,10 @@ The Unity job writes `yang2019_fig7_validation.json`, publication-quality PDF
 and PNG overlays, accepted states and summaries, SHA-256 hashes, and a curated
 ZIP under the campaign root.  The one-line bootstrap printed with the release
 pins the exact Git commit and prints the Slurm job ID and campaign path.
+
+## Controlled source-variant audit
+
+The first run passed convergence and grid gates but not the published heat-flux
+profiles.  No fitted multiplier is applied.  The separate source-audit
+bootstrap evaluates the complete ASME-2009 cavity coefficient set and its
+Sutherland law, retaining the same profiles, grids and fail-closed scorer.
