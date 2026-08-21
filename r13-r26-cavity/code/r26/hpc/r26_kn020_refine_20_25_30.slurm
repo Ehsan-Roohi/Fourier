@@ -13,13 +13,24 @@ set -euo pipefail
 
 : "${R26_REFINE_SEED:?Set R26_REFINE_SEED to the accepted Kn=0.20 N20 last_accepted_state.npz}"
 : "${R26_REFINE_OUT:?Set R26_REFINE_OUT to a new output directory}"
+: "${R26_REFINE_REF:?Set R26_REFINE_REF to the immutable 40-character Git commit SHA}"
+
+[[ "$R26_REFINE_REF" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "R26_REFINE_REF must be a lowercase 40-character Git commit SHA" >&2
+  exit 2
+}
 
 test -f "$R26_REFINE_SEED"
 test ! -e "$R26_REFINE_OUT"
 mkdir -p "$R26_REFINE_OUT"
 
 REPO="$R26_REFINE_OUT/source"
-git clone --depth 1 https://github.com/Ehsan-Roohi/Fourier.git "$REPO"
+git clone --filter=blob:none --no-checkout https://github.com/Ehsan-Roohi/Fourier.git "$REPO"
+git -C "$REPO" fetch --depth=1 origin "$R26_REFINE_REF"
+git -C "$REPO" checkout --detach FETCH_HEAD
+ACTUAL_REF="$(git -C "$REPO" rev-parse HEAD)"
+test "$ACTUAL_REF" = "$R26_REFINE_REF"
+printf '%s\n' "$ACTUAL_REF" > "$R26_REFINE_OUT/source_commit.txt"
 PKG="$REPO/r13-r26-cavity/code/r26"
 export PYTHONPATH="$PKG"
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-32}"
@@ -37,10 +48,10 @@ run_stage () {
     --lid-speed-m-s 100 --wall-temperature-k 300 --beta 0.0 \
     --closure-mode jfm2009 --solver colored_newton \
     --raw-tolerance 1e-8 --solver-tolerance 1e-9 --max-nfev 240 \
-    --max-objective-evaluations 2500 \
+    --max-objective-evaluations 12000 \
     --initial-state "$seed" --reconcile-initial --output-dir "$out"
   python3 "$PKG/tools/validate_r26_maxwell_run.py" "$out" \
-    --expected-kn 0.20 --expected-nodes "$nodes" --raw-tolerance 1e-8
+    --expected-kn 0.20 --expected-nodes "$nodes" --expected-beta 0.0 --raw-tolerance 1e-8
 }
 
 # Do not jump directly from N20 to N30: acceptance at N25 is a hard gate.
