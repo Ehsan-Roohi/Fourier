@@ -18,6 +18,7 @@ import numpy as np
 R26_ROOT = Path(__file__).resolve().parents[1]
 CODE = R26_ROOT
 DRIVER = R26_ROOT / "analysis" / "run_jfm_observability_continuation.py"
+VALIDATOR = R26_ROOT / "tools" / "validate_r26_maxwell_run.py"
 sys.path.insert(0, str(CODE))
 
 from r26_cases import (  # noqa: E402
@@ -106,6 +107,68 @@ class MaxwellContract(unittest.TestCase):
             )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("do not pass --vhs-omega", result.stderr)
+
+    def test_driver_requires_reconciliation_for_restart_already_at_target(self) -> None:
+        case = jfm_maxwell_cavity_case(5, kn=0.20, grid_stretch_beta=0.0)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            restart = root / "restart.npz"
+            np.savez_compressed(
+                restart,
+                state=case.equilibrium_state(),
+                x=case.x,
+                y=case.y,
+                lid_velocity=case.lid_velocity,
+                kn_input=case.kn,
+                kn_convention=case.kn_convention.value,
+                beta=case.grid_stretch_beta,
+                accepted=True,
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(DRIVER),
+                    "--nodes", "5",
+                    "--case-family", "jfm-maxwell",
+                    "--kn-gu", "0.20",
+                    "--beta", "0.0",
+                    "--initial-state", str(restart),
+                    "--output-dir", str(root / "out"),
+                ],
+                env={**dict(__import__("os").environ), "PYTHONPATH": str(CODE)},
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be revalidated with --reconcile-initial", result.stderr)
+
+    def test_driver_termination_is_fail_closed(self) -> None:
+        spec = importlib.util.spec_from_file_location("r26_continuation_exit", DRIVER)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.termination_exit_code("target_accepted"), 0)
+        for termination in (
+            "not_started",
+            "grid_reconciliation_rejected",
+            "smoke_rejected",
+            "minimum_step_rejected",
+        ):
+            with self.subTest(termination=termination):
+                self.assertNotEqual(module.termination_exit_code(termination), 0)
+
+    def test_validator_requires_declared_grid_beta(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(VALIDATOR), "--help"],
+            env={**dict(__import__("os").environ), "PYTHONPATH": str(CODE)},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--expected-beta", result.stdout)
 
 
 if __name__ == "__main__":
