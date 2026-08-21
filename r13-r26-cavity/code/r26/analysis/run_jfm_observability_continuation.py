@@ -110,6 +110,12 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(jsonable(payload), indent=2, sort_keys=True) + "\n")
 
 
+def termination_exit_code(termination: str) -> int:
+    """Return success only when the requested target root was accepted."""
+
+    return 0 if termination == "target_accepted" else 1
+
+
 def make_problem(case: object) -> R26NodeBVP:
     return R26NodeBVP(
         case,
@@ -424,6 +430,15 @@ def main() -> None:
         unreconciled_initial_state = state.copy() if needs_reconciliation else None
     if current_lid > target_lid + 1.0e-15:
         parser.error("restart lid exceeds the requested target lid")
+    if (
+        args.initial_state is not None
+        and not needs_reconciliation
+        and current_lid >= target_lid - 1.0e-15
+    ):
+        parser.error(
+            "a restart already at the target lid must be revalidated with "
+            "--reconcile-initial"
+        )
 
     manifest = build_source_manifest()
     solver_tolerance = (
@@ -444,7 +459,13 @@ def main() -> None:
     attempts: list[dict[str, object]] = []
     step = float(args.initial_step)
     attempt = 0
-    termination = "not_started"
+    termination = (
+        "target_accepted"
+        if args.initial_state is None
+        and state_accepted_on_target_grid
+        and current_lid >= target_lid - 1.0e-15
+        else "not_started"
+    )
     while needs_reconciliation or current_lid < target_lid - 1.0e-15:
         attempt += 1
         reconciling_this_attempt = needs_reconciliation
@@ -625,6 +646,7 @@ def main() -> None:
             sort_keys=True,
         )
     )
+    raise SystemExit(termination_exit_code(termination))
 
 
 if __name__ == "__main__":
