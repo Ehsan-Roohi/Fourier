@@ -8,8 +8,15 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import sys
 
 import numpy as np
+
+# Allow direct execution by absolute path during login-node preflight, without
+# relying on the caller to export PYTHONPATH first.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from r26_cases import jfm_maxwell_cavity_case
 from r26_discretization import R26NodeBVP
