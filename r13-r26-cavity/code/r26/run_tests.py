@@ -18,6 +18,7 @@ from tests import (
     test_r26_stretched_grid,
     test_r26_tensor_closures,
     test_r26_wall_conditions,
+    test_maxwell_contract,
 )
 
 
@@ -39,6 +40,7 @@ def suite() -> unittest.TestSuite:
         for name, function in inspect.getmembers(module, inspect.isfunction):
             if name.startswith("test_") and len(inspect.signature(function).parameters) == 0:
                 result.addTest(unittest.FunctionTestCase(function, description=f"{module.__name__}.{name}"))
+    result.addTests(unittest.defaultTestLoader.loadTestsFromModule(test_maxwell_contract))
     return result
 
 
