@@ -11,6 +11,11 @@ from pathlib import Path
 
 import numpy as np
 
+from r26_cases import jfm_maxwell_cavity_case
+from r26_discretization import R26NodeBVP
+from r26_fv_backend import compatible_fv_bulk_residual, wall_bounded_control_volume_weights
+from r26_validation import global_balance_diagnostics
+
 
 EXPECTED_CORE_HASHES = {
     "code/r26_bulk_equations.py": "9abe3943ce541e6c5243a61893c1428daea30cf8fae42ab3e90c140eb7ba6a06",
@@ -29,6 +34,7 @@ def main() -> None:
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--expected-kn", type=float, required=True, choices=(0.05, 0.20))
     parser.add_argument("--expected-nodes", type=int, required=True)
+    parser.add_argument("--expected-beta", type=float, required=True)
     parser.add_argument("--raw-tolerance", type=float, default=1.0e-8)
     parser.add_argument(
         "--expected-target-lid",
@@ -57,6 +63,7 @@ def main() -> None:
     require(float(case.get("wall_accommodation")) == 1.0, "wall is not fully diffuse")
     require(float(case.get("wall_temperature_K")) == 300.0, "wrong wall temperature")
     require(float(case.get("lid_speed_m_per_s")) == 100.0, "wrong lid speed")
+    require(math.isclose(float(case.get("beta")), args.expected_beta, rel_tol=0.0, abs_tol=2e-15), "wrong grid-stretch beta")
     require("Pure Maxwell-molecule" in str(case.get("provenance")), "Maxwell provenance missing")
     require(math.isclose(float(case.get("mu_equilibrium")), args.expected_kn * math.sqrt(2.0 / math.pi), rel_tol=0.0, abs_tol=2e-15), "Gu Kn-to-mu conversion mismatch")
     require(math.isclose(float(case.get("lid_target")), args.expected_target_lid, rel_tol=0.0, abs_tol=2e-14), "wrong target lid")
@@ -81,12 +88,44 @@ def main() -> None:
 
     with np.load(state_path, allow_pickle=False) as archive:
         state = np.asarray(archive["state"], dtype=float)
+        x = np.asarray(archive["x"], dtype=float)
+        y = np.asarray(archive["y"], dtype=float)
         require(state.shape == (args.expected_nodes, args.expected_nodes, 17), "wrong state shape")
+        require(x.shape == (args.expected_nodes,), "wrong x-coordinate shape")
+        require(y.shape == (args.expected_nodes,), "wrong y-coordinate shape")
         require(np.isfinite(state).all(), "state contains NaN or infinity")
         require(float(np.min(state[..., 0])) > 0.0, "state density is non-positive")
         require(float(np.min(state[..., 3])) > 0.0, "state temperature is non-positive")
         require(str(np.asarray(archive["kn_convention"]).item()) == "gu_lambda_over_L", "state Kn convention mismatch")
         require(math.isclose(float(np.asarray(archive["kn_input"]).item()), args.expected_kn, rel_tol=0.0, abs_tol=2e-15), "state Kn mismatch")
+        require(math.isclose(float(np.asarray(archive["beta"]).item()), args.expected_beta, rel_tol=0.0, abs_tol=2e-15), "state beta mismatch")
+        require(math.isclose(float(np.asarray(archive["lid_velocity"]).item()), args.expected_target_lid, rel_tol=0.0, abs_tol=2e-14), "state lid mismatch")
+
+    expected_case = jfm_maxwell_cavity_case(
+        args.expected_nodes,
+        kn=args.expected_kn,
+        lid_speed_m_per_s=100.0,
+        wall_temperature_K=300.0,
+        grid_stretch_beta=args.expected_beta,
+    ).with_lid_velocity(args.expected_target_lid, suffix="independent-validator")
+    require(np.array_equal(x, expected_case.x), "x coordinates do not match the declared grid")
+    require(np.array_equal(y, expected_case.y), "y coordinates do not match the declared grid")
+    problem = R26NodeBVP(
+        expected_case,
+        bulk_operator=compatible_fv_bulk_residual,
+        mass_weights=wall_bounded_control_volume_weights(expected_case.x, expected_case.y),
+    )
+    independent = problem.evaluate(state)
+    independent_raw_gate = max(
+        independent.diagnostics.raw_total_linf,
+        abs(independent.diagnostics.held_out_continuity),
+        abs(independent.diagnostics.mass_error),
+    )
+    require(independent_raw_gate <= args.raw_tolerance, "independently recomputed raw residual gate failed")
+    independent_balance = global_balance_diagnostics(state, expected_case)
+    require(float(independent_balance["wall_effective_pressure_min"]) > 0.0, "independently recomputed wall pressure failed")
+    require(float(independent_balance["momentum_boundary_flux_linf"]) <= 10.0 * args.raw_tolerance, "independently recomputed momentum balance failed")
+    require(abs(float(independent_balance["internal_energy_balance_error"])) <= 10.0 * args.raw_tolerance, "independently recomputed energy balance failed")
 
     digest = hashlib.sha256(state_path.read_bytes()).hexdigest()
     print(json.dumps({"status": "R26_MAXWELL_VALIDATION_PASS", "kn_gu": args.expected_kn, "nodes": args.expected_nodes, "state_file_sha256": digest}, sort_keys=True))
