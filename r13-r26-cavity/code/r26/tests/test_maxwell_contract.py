@@ -160,9 +160,11 @@ class MaxwellContract(unittest.TestCase):
                 self.assertNotEqual(module.termination_exit_code(termination), 0)
 
     def test_validator_requires_declared_grid_beta(self) -> None:
+        environment = dict(__import__("os").environ)
+        environment.pop("PYTHONPATH", None)
         result = subprocess.run(
             [sys.executable, str(VALIDATOR), "--help"],
-            env={**dict(__import__("os").environ), "PYTHONPATH": str(CODE)},
+            env=environment,
             capture_output=True,
             text=True,
             check=False,
