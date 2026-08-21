@@ -19,6 +19,7 @@ R26_ROOT = Path(__file__).resolve().parents[1]
 CODE = R26_ROOT
 DRIVER = R26_ROOT / "analysis" / "run_jfm_observability_continuation.py"
 VALIDATOR = R26_ROOT / "tools" / "validate_r26_maxwell_run.py"
+FRESH_N30_SLURM = R26_ROOT / "hpc" / "r26_kn020_fresh_n30.slurm"
 sys.path.insert(0, str(CODE))
 
 from r26_cases import (  # noqa: E402
@@ -43,6 +44,16 @@ def sha256(path: Path) -> str:
 
 
 class MaxwellContract(unittest.TestCase):
+    def test_fresh_n30_workflow_cannot_seed_from_n28(self) -> None:
+        script = FRESH_N30_SLURM.read_text()
+        self.assertIn("--nodes 30", script)
+        self.assertIn("--smoke-lid 0.001", script)
+        self.assertIn("--initial-step 0.02", script)
+        self.assertIn("--minimum-step 0.0025", script)
+        self.assertNotIn("--initial-state", script)
+        self.assertNotIn("--reconcile-initial", script)
+        self.assertNotIn("R26_N28_DIR", script)
+
     def test_collision_relevant_sources_are_hash_matched(self) -> None:
         for name, expected in BASELINE_CORE_HASHES.items():
             self.assertEqual(sha256(CODE / name), expected, name)
