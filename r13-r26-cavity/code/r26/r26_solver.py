@@ -71,6 +71,7 @@ class SolveOptions:
     held_out_continuity_tolerance: float = 1.0e-7
     max_iterations: int = 200
     max_function_evaluations: int = 5000
+    max_objective_evaluations: int | None = None
     line_search: str = "armijo"
     display: bool = False
     invalid_penalty: float = 1.0e8
@@ -82,6 +83,8 @@ class SolveOptions:
             raise ValueError("solver tolerances must be positive")
         if self.max_iterations < 1 or self.max_function_evaluations < 1:
             raise ValueError("solver iteration limits must be positive")
+        if self.max_objective_evaluations is not None and self.max_objective_evaluations < 1:
+            raise ValueError("objective evaluation limit must be positive when supplied")
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,10 @@ class R26SolveResult:
     invalid_evaluations: int
     last_invalid_error: str | None
     solver_method: str
+
+
+class _ObjectiveEvaluationLimitReached(RuntimeError):
+    """Internal fail-closed stop for an exhausted nonlinear work budget."""
 
 
 class EncodedR26Objective:
@@ -403,6 +410,11 @@ def solve_r26_bvp(
 
         def counted(vector: np.ndarray) -> np.ndarray:
             nonlocal evaluations
+            if (
+                options.max_objective_evaluations is not None
+                and evaluations >= options.max_objective_evaluations
+            ):
+                raise _ObjectiveEvaluationLimitReached
             evaluations += 1
             return objective(vector)
 
@@ -413,73 +425,79 @@ def solve_r26_bvp(
         jacobian = None
         factorization = None
         chord_steps = 0
-        for iteration in range(1, options.max_iterations + 1):
-            iterations = iteration
-            residual_linf = float(np.max(np.abs(residual), initial=0.0))
-            if residual_linf <= options.residual_tolerance:
-                success = True
-                message = "colored sparse Newton residual tolerance reached"
-                break
-            if factorization is None or chord_steps >= 3:
-                jacobian = approx_derivative(
-                    counted,
-                    encoded,
-                    method="2-point",
-                    # R26 high-order moments can be many orders of magnitude
-                    # smaller than unity.  A relative-only perturbation then
-                    # rounds away and corrupts the colored Jacobian precisely
-                    # in the wall-layer rows that control grid reconciliation.
-                    # Use the already audited absolute floor while retaining
-                    # proportional growth for large encoded coordinates.
-                    abs_step=fv_absolute_difference_step(encoded),
-                    bounds=(lower, upper),
-                    sparsity=pattern,
-                ).tocsc()
-                try:
-                    factorization = splu(jacobian)
-                except RuntimeError:
-                    factorization = None
-                chord_steps = 0
-            try:
-                if factorization is None:
-                    raise RuntimeError("sparse LU unavailable")
-                direction = factorization.solve(-residual)
-                linear_solver = "splu"
-            except RuntimeError:
-                assert jacobian is not None
-                direction = lsmr(jacobian, -residual, atol=1.0e-12, btol=1.0e-12)[0]
-                linear_solver = "lsmr-fallback"
-            if not np.isfinite(direction).all():
-                message = f"{linear_solver} produced a non-finite Newton direction"
-                break
-            merit = 0.5 * float(np.dot(residual, residual))
-            alpha = 1.0
-            accepted_step = False
-            while alpha >= 2.0**-20:
-                trial = np.clip(encoded + alpha * direction, lower, upper)
-                trial_residual = counted(trial)
-                trial_merit = 0.5 * float(np.dot(trial_residual, trial_residual))
-                if np.isfinite(trial_merit) and trial_merit < merit * (1.0 - 1.0e-4 * alpha):
-                    encoded = trial
-                    residual = trial_residual
-                    accepted_step = True
-                    chord_steps += 1
-                    if trial_merit > 0.25 * merit:
-                        factorization = None
+        try:
+            for iteration in range(1, options.max_iterations + 1):
+                iterations = iteration
+                residual_linf = float(np.max(np.abs(residual), initial=0.0))
+                if residual_linf <= options.residual_tolerance:
+                    success = True
+                    message = "colored sparse Newton residual tolerance reached"
                     break
-                alpha *= 0.5
-            if not accepted_step:
-                if chord_steps > 0:
-                    factorization = None
+                if factorization is None or chord_steps >= 3:
+                    jacobian = approx_derivative(
+                        counted,
+                        encoded,
+                        method="2-point",
+                        # R26 high-order moments can be many orders of magnitude
+                        # smaller than unity.  A relative-only perturbation then
+                        # rounds away and corrupts the colored Jacobian precisely
+                        # in the wall-layer rows that control grid reconciliation.
+                        # Use the already audited absolute floor while retaining
+                        # proportional growth for large encoded coordinates.
+                        abs_step=fv_absolute_difference_step(encoded),
+                        bounds=(lower, upper),
+                        sparsity=pattern,
+                    ).tocsc()
+                    try:
+                        factorization = splu(jacobian)
+                    except RuntimeError:
+                        factorization = None
                     chord_steps = 0
-                    continue
-                message = f"colored sparse Newton line search failed after {linear_solver}"
-                break
-        else:
-            residual_linf = float(np.max(np.abs(residual), initial=0.0))
-            if residual_linf <= options.residual_tolerance:
-                success = True
-                message = "colored sparse Newton residual tolerance reached"
+                try:
+                    if factorization is None:
+                        raise RuntimeError("sparse LU unavailable")
+                    direction = factorization.solve(-residual)
+                    linear_solver = "splu"
+                except RuntimeError:
+                    assert jacobian is not None
+                    direction = lsmr(jacobian, -residual, atol=1.0e-12, btol=1.0e-12)[0]
+                    linear_solver = "lsmr-fallback"
+                if not np.isfinite(direction).all():
+                    message = f"{linear_solver} produced a non-finite Newton direction"
+                    break
+                merit = 0.5 * float(np.dot(residual, residual))
+                alpha = 1.0
+                accepted_step = False
+                while alpha >= 2.0**-20:
+                    trial = np.clip(encoded + alpha * direction, lower, upper)
+                    trial_residual = counted(trial)
+                    trial_merit = 0.5 * float(np.dot(trial_residual, trial_residual))
+                    if np.isfinite(trial_merit) and trial_merit < merit * (1.0 - 1.0e-4 * alpha):
+                        encoded = trial
+                        residual = trial_residual
+                        accepted_step = True
+                        chord_steps += 1
+                        if trial_merit > 0.25 * merit:
+                            factorization = None
+                        break
+                    alpha *= 0.5
+                if not accepted_step:
+                    if chord_steps > 0:
+                        factorization = None
+                        chord_steps = 0
+                        continue
+                    message = f"colored sparse Newton line search failed after {linear_solver}"
+                    break
+            else:
+                residual_linf = float(np.max(np.abs(residual), initial=0.0))
+                if residual_linf <= options.residual_tolerance:
+                    success = True
+                    message = "colored sparse Newton residual tolerance reached"
+        except _ObjectiveEvaluationLimitReached:
+            message = (
+                "colored sparse Newton objective-evaluation limit reached "
+                f"({options.max_objective_evaluations})"
+            )
         scipy_result = OptimizeResult(
             x=encoded,
             success=success,

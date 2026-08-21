@@ -315,3 +315,25 @@ def test_colored_newton_uses_absolute_fd_floor_for_small_moments() -> None:
     assert captured["abs_step"] is not None
     assert captured["abs_step"].shape == (problem.unknown_count,)
     assert np.min(captured["abs_step"]) >= 2.0e-6
+
+
+def test_colored_newton_stops_at_the_objective_evaluation_budget() -> None:
+    problem = _problem(nodes=5)
+    state = problem.case.equilibrium_state()
+    state[2, 2, 16] = 0.1
+    result = solve_r26_bvp(
+        problem,
+        state,
+        options=SolveOptions(
+            method="colored_newton",
+            residual_tolerance=1.0e-12,
+            held_out_continuity_tolerance=1.0e-12,
+            max_iterations=100,
+            max_objective_evaluations=1,
+        ),
+    )
+
+    assert not result.converged
+    assert not result.scipy_success
+    assert result.function_evaluations == 1
+    assert "objective-evaluation limit reached (1)" in result.message

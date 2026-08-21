@@ -37,6 +37,7 @@ run_stage () {
     --lid-speed-m-s 100 --wall-temperature-k 300 --beta 0.0 \
     --closure-mode jfm2009 --solver colored_newton \
     --raw-tolerance 1e-8 --solver-tolerance 1e-9 --max-nfev 240 \
+    --max-objective-evaluations 2500 \
     --initial-state "$seed" --reconcile-initial --output-dir "$out"
   python3 "$PKG/tools/validate_r26_maxwell_run.py" "$out" \
     --expected-kn 0.20 --expected-nodes "$nodes" --raw-tolerance 1e-8

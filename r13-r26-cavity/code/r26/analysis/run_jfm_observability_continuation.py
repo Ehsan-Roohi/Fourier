@@ -280,6 +280,14 @@ def main() -> None:
     parser.add_argument("--minimum-step", type=float, default=0.0025)
     parser.add_argument("--max-nfev", type=int, default=80)
     parser.add_argument(
+        "--max-objective-evaluations",
+        type=int,
+        help=(
+            "hard fail-closed budget for residual evaluations in colored Newton; "
+            "use this during refined-grid reconciliation to prevent stalled jobs"
+        ),
+    )
+    parser.add_argument(
         "--solver",
         choices=("colored_newton", "least_squares", "krylov"),
         default="colored_newton",
@@ -431,6 +439,7 @@ def main() -> None:
         held_out_continuity_tolerance=args.raw_tolerance,
         max_iterations=args.max_nfev,
         max_function_evaluations=args.max_nfev,
+        max_objective_evaluations=args.max_objective_evaluations,
     )
     attempts: list[dict[str, object]] = []
     step = float(args.initial_step)
