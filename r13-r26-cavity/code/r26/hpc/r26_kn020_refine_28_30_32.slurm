@@ -13,6 +13,12 @@ set -euo pipefail
 
 : "${R26_N28_DIR:?Set R26_N28_DIR to the accepted Kn=0.20 N28 run directory}"
 : "${R26_REFINE_OUT:?Set R26_REFINE_OUT to a new output directory}"
+: "${R26_REFINE_REF:?Set R26_REFINE_REF to the immutable 40-character Git commit SHA}"
+
+[[ "$R26_REFINE_REF" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "R26_REFINE_REF must be a lowercase 40-character Git commit SHA" >&2
+  exit 2
+}
 
 test -f "$R26_N28_DIR/last_accepted_state.npz"
 test -f "$R26_N28_DIR/run_summary.json"
@@ -20,10 +26,12 @@ test ! -e "$R26_REFINE_OUT"
 mkdir -p "$R26_REFINE_OUT"
 
 REPO="$R26_REFINE_OUT/source"
-REF="${R26_REFINE_REF:-main}"
-git clone --filter=blob:none https://github.com/Ehsan-Roohi/Fourier.git "$REPO"
-git -C "$REPO" checkout --detach "origin/$REF"
-git -C "$REPO" rev-parse HEAD > "$R26_REFINE_OUT/source_commit.txt"
+git clone --filter=blob:none --no-checkout https://github.com/Ehsan-Roohi/Fourier.git "$REPO"
+git -C "$REPO" fetch --depth=1 origin "$R26_REFINE_REF"
+git -C "$REPO" checkout --detach FETCH_HEAD
+ACTUAL_REF="$(git -C "$REPO" rev-parse HEAD)"
+test "$ACTUAL_REF" = "$R26_REFINE_REF"
+printf '%s\n' "$ACTUAL_REF" > "$R26_REFINE_OUT/source_commit.txt"
 
 PKG="$REPO/r13-r26-cavity/code/r26"
 export PYTHONPATH="$PKG"
@@ -33,7 +41,7 @@ export MKL_NUM_THREADS="$OMP_NUM_THREADS"
 
 (cd "$PKG" && python3 run_tests.py)
 python3 "$PKG/tools/validate_r26_maxwell_run.py" "$R26_N28_DIR" \
-  --expected-kn 0.20 --expected-nodes 28 --raw-tolerance 1e-8
+  --expected-kn 0.20 --expected-nodes 28 --expected-beta 0.0 --raw-tolerance 1e-8
 
 run_stage () {
   local nodes="$1"
@@ -44,10 +52,10 @@ run_stage () {
     --lid-speed-m-s 100 --wall-temperature-k 300 --beta 0.0 \
     --closure-mode jfm2009 --solver colored_newton \
     --raw-tolerance 1e-8 --solver-tolerance 1e-9 --max-nfev 48 \
-    --max-objective-evaluations 2500 \
+    --max-objective-evaluations 12000 \
     --initial-state "$seed" --reconcile-initial --output-dir "$out"
   python3 "$PKG/tools/validate_r26_maxwell_run.py" "$out" \
-    --expected-kn 0.20 --expected-nodes "$nodes" --raw-tolerance 1e-8
+    --expected-kn 0.20 --expected-nodes "$nodes" --expected-beta 0.0 --raw-tolerance 1e-8
 }
 
 # N29 previously stalled.  Move from the accepted even N28 grid to N30, then
