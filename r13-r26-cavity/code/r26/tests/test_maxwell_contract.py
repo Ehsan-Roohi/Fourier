@@ -19,7 +19,10 @@ R26_ROOT = Path(__file__).resolve().parents[1]
 CODE = R26_ROOT
 DRIVER = R26_ROOT / "analysis" / "run_jfm_observability_continuation.py"
 VALIDATOR = R26_ROOT / "tools" / "validate_r26_maxwell_run.py"
+GATE_VALIDATOR = R26_ROOT / "tools" / "validate_r26_globalization_gate.py"
 N8_N16_GATE_SLURM = R26_ROOT / "hpc" / "r26_kn020_ser_ptc_gate_n8_n16.slurm"
+N30_PRODUCTION_SLURM = R26_ROOT / "hpc" / "r26_kn020_ser_ptc_fresh_n30.slurm"
+N30_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_ser_ptc_fresh_n30.sh"
 sys.path.insert(0, str(CODE))
 
 from r26_cases import (  # noqa: E402
@@ -44,7 +47,7 @@ def sha256(path: Path) -> str:
 
 
 class MaxwellContract(unittest.TestCase):
-    def test_new_branch_exposes_only_the_n8_n16_globalization_gate(self) -> None:
+    def test_n8_n16_globalization_gate_remains_source_locked(self) -> None:
         script = N8_N16_GATE_SLURM.read_text()
         self.assertIn("run_gate 8", script)
         self.assertIn("run_gate 16", script)
@@ -59,14 +62,66 @@ class MaxwellContract(unittest.TestCase):
         self.assertNotIn("--reconcile-initial", script)
         self.assertNotIn("R26_N28_DIR", script)
         self.assertNotIn("run_gate 30", script)
+
+    def test_n30_production_is_fresh_bounded_and_gate_locked(self) -> None:
+        script = N30_PRODUCTION_SLURM.read_text()
+        self.assertIn('EXPECTED_GATE_REF="8cbd874eea68dd475faa3f5e3fb318b49cc0c665"', script)
+        self.assertIn("R26_N16_GATE_DIR", script)
+        self.assertIn("validate_r26_globalization_gate.py", script)
+        self.assertIn("--expected-source-commit", script)
+        self.assertIn("--nodes 30", script)
+        self.assertIn("--analytic-mass-jacobian", script)
+        self.assertIn("--secant-predictor", script)
+        self.assertIn("--ser-ptc", script)
+        self.assertIn("--max-jacobians 5", script)
+        self.assertIn("--max-objective-evaluations 4000", script)
+        self.assertIn("--smoke-lid 0.001", script)
+        self.assertIn("--initial-step 0.04", script)
+        self.assertIn("--minimum-step 0.0025", script)
+        self.assertIn("--require-modern-globalization", script)
+        self.assertIn("N30_PRODUCTION_PASSED.json", script)
+        self.assertIn("N30_PRODUCTION_FAILED.json", script)
+        self.assertIn("_RESULTS.zip", script)
+        self.assertNotIn("--initial-state", script)
+        self.assertNotIn("--reconcile-initial", script)
+        self.assertNotIn("R26_N28_DIR", script)
+        self.assertNotIn("last_accepted_state.npz\" --reconcile", script)
+        self.assertTrue(N30_SUBMIT.is_file())
         self.assertEqual(
             tuple((R26_ROOT / "hpc").glob("*n30*.slurm")),
-            (),
+            (N30_PRODUCTION_SLURM,),
         )
-        self.assertEqual(
-            tuple((R26_ROOT / "hpc").glob("*30*.slurm")),
-            (),
+
+    def test_gate_validator_is_standalone_and_fail_closed(self) -> None:
+        environment = dict(__import__("os").environ)
+        environment.pop("PYTHONPATH", None)
+        result = subprocess.run(
+            [sys.executable, str(GATE_VALIDATOR), "--help"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
         )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--expected-source-commit", result.stdout)
+        self.assertIn("--raw-tolerance", result.stdout)
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(GATE_VALIDATOR),
+                    directory,
+                    "--expected-source-commit",
+                    "8cbd874eea68dd475faa3f5e3fb318b49cc0c665",
+                ],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("N16_GATE_PASSED.json missing", result.stderr)
 
     def test_rejection_step_clamps_to_the_exact_floor_once(self) -> None:
         spec = importlib.util.spec_from_file_location("r26_continuation_floor", DRIVER)
