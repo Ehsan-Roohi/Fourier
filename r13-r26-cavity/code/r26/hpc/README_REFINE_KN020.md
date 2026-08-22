@@ -51,3 +51,38 @@ helper creates a timestamped directory under `CavityColdToHotIdentify`.
 
 Passing N30 remains an algebraic acceptance result.  Grid convergence and
 external agreement with DSMC are deliberately not claimed by this workflow.
+
+## Source-locked N30 pseudo-arclength rescue
+
+The fresh production job at commit
+`312ee29799e5fdb4340d1146af5c408d72563d49` established a more precise
+failure boundary.  It accepted N30 from equilibrium through
+`lid=0.36935558170895255`, with positive density, temperature, and effective
+wall pressure and no invalid evaluations, but fixed-parameter continuation
+could not correct `lid=0.37185558170895255` within five Jacobian builds.  Its
+raw gate remained `1.98608e-2`.  This is a numerical continuation stall; it is
+not evidence of a physical blow-up and it is not an accepted 100 m/s result.
+
+`r26_kn020_n30_pseudo_arclength_rescue.slurm` addresses that specific failure
+without starting another arbitrary small-step ladder:
+
+1. source-locks and independently rechecks the last two accepted N30 roots
+   from the failed production directory;
+2. promotes lid velocity to an unknown and solves the full bordered
+   pseudo-arclength system, which remains regular at a simple branch fold;
+3. retains the analytic global-mass Jacobian row, positivity-preserving log
+   coordinates, and bulk-only SER pseudo-transient globalization;
+4. caps each arclength attempt at seven Jacobian builds and 6000 objective
+   evaluations, with at most 24 attempts and a declared step floor;
+5. accepts every intermediate point only after the unchanged raw residual,
+   mass, positivity, wall-pressure, momentum, and energy gates pass;
+6. uses the first target-bracketing segment only to construct a predictor at
+   exactly 100 m/s; and
+7. performs one ordinary fixed-lid correction and independent validation at
+   the target before any success record is written.
+
+Thus pseudo-arclength changes the path parameterization, not the R26 equations
+or their final acceptance criteria.  If the target is not bracketed within the
+bounded budget, or the final fixed-lid correction fails, the job packages a
+diagnostic failure and makes no N30 claim.  N32 remains unauthorized until
+this N30 target gate passes.

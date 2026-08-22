@@ -23,6 +23,15 @@ GATE_VALIDATOR = R26_ROOT / "tools" / "validate_r26_globalization_gate.py"
 N8_N16_GATE_SLURM = R26_ROOT / "hpc" / "r26_kn020_ser_ptc_gate_n8_n16.slurm"
 N30_PRODUCTION_SLURM = R26_ROOT / "hpc" / "r26_kn020_ser_ptc_fresh_n30.slurm"
 N30_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_ser_ptc_fresh_n30.sh"
+N30_ARCLENGTH_SLURM = (
+    R26_ROOT / "hpc" / "r26_kn020_n30_pseudo_arclength_rescue.slurm"
+)
+N30_ARCLENGTH_SUBMIT = (
+    R26_ROOT / "hpc" / "submit_r26_kn020_n30_pseudo_arclength_rescue.sh"
+)
+N30_ARCLENGTH_VALIDATOR = (
+    R26_ROOT / "tools" / "validate_r26_arclength_rescue.py"
+)
 sys.path.insert(0, str(CODE))
 
 from r26_cases import (  # noqa: E402
@@ -88,9 +97,62 @@ class MaxwellContract(unittest.TestCase):
         self.assertNotIn("last_accepted_state.npz\" --reconcile", script)
         self.assertTrue(N30_SUBMIT.is_file())
         self.assertEqual(
-            tuple((R26_ROOT / "hpc").glob("*n30*.slurm")),
-            (N30_PRODUCTION_SLURM,),
+            set((R26_ROOT / "hpc").glob("*n30*.slurm")),
+            {N30_PRODUCTION_SLURM, N30_ARCLENGTH_SLURM},
         )
+
+    def test_n30_arclength_rescue_is_bounded_source_locked_and_fail_closed(self) -> None:
+        script = N30_ARCLENGTH_SLURM.read_text()
+        self.assertIn(
+            'EXPECTED_FAILED_REF="312ee29799e5fdb4340d1146af5c408d72563d49"',
+            script,
+        )
+        self.assertIn("N30_PRODUCTION_FAILED.json", script)
+        self.assertIn("run_r26_pseudo_arclength_rescue.py", script)
+        self.assertIn("--maximum-attempts 24", script)
+        self.assertIn("--maximum-jacobians 7", script)
+        self.assertIn("--maximum-objective-evaluations 6000", script)
+        self.assertIn("landing_seed.npz", script)
+        self.assertIn("--reconcile-initial", script)
+        self.assertIn("--max-jacobians 8", script)
+        self.assertIn("validate_r26_arclength_rescue.py", script)
+        self.assertIn("N30_ARCLENGTH_RESCUE_PASSED.json", script)
+        self.assertIn("N30_ARCLENGTH_RESCUE_FAILED.json", script)
+        self.assertIn("_RESULTS.zip", script)
+        self.assertNotIn("R26_N16_GATE_DIR", script)
+        self.assertNotIn("R26_N28_DIR", script)
+        self.assertTrue(N30_ARCLENGTH_SUBMIT.is_file())
+
+    def test_arclength_validator_is_standalone_and_fail_closed(self) -> None:
+        environment = dict(__import__("os").environ)
+        environment.pop("PYTHONPATH", None)
+        result = subprocess.run(
+            [sys.executable, str(N30_ARCLENGTH_VALIDATOR), "--help"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--expected-target-lid", result.stdout)
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(N30_ARCLENGTH_VALIDATOR),
+                    directory,
+                    directory,
+                    "--expected-target-lid",
+                    "0.40032038451271784",
+                ],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("required artifact missing", result.stderr)
 
     def test_gate_validator_is_standalone_and_fail_closed(self) -> None:
         environment = dict(__import__("os").environ)

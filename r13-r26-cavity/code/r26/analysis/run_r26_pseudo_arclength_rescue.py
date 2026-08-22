@@ -1,0 +1,474 @@
+#!/usr/bin/env python3
+"""Resume a stalled N30 branch with bounded pseudo-arclength continuation."""
+
+from __future__ import annotations
+
+import argparse
+from dataclasses import asdict
+from datetime import datetime, timezone
+import hashlib
+import json
+from pathlib import Path
+import platform
+import sys
+import time
+
+import numpy as np
+import scipy
+
+from r26_arclength import (
+    ArcLengthCorrectorOptions,
+    ArcLengthMetric,
+    interpolate_bracketed_state,
+    normalized_secant_tangent,
+    solve_r26_pseudo_arclength_step,
+)
+from r26_cases import jfm_maxwell_cavity_case
+from r26_discretization import R26NodeBVP
+from r26_fv_backend import compatible_fv_bulk_residual, wall_bounded_control_volume_weights
+from r26_solver import LogStateTransform
+from r26_validation import global_balance_diagnostics
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CORE_FILES = tuple(sorted(ROOT.glob("r26_*.py")))
+SOURCE_FILES = CORE_FILES + (Path(__file__).resolve(),)
+
+
+def require(condition: bool, message: str) -> None:
+    if not condition:
+        raise SystemExit(f"R26_ARCLENGTH_RESCUE_FAILED: {message}")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def state_sha256(state: np.ndarray) -> str:
+    value = np.ascontiguousarray(np.asarray(state, dtype="<f8"))
+    digest = hashlib.sha256()
+    digest.update(str(value.shape).encode("ascii"))
+    digest.update(b"|<f8|")
+    digest.update(value.tobytes())
+    return digest.hexdigest()
+
+
+def jsonable(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [jsonable(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return jsonable(value.tolist())
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        return number if np.isfinite(number) else None
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    return value
+
+
+def write_json(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(
+        json.dumps(jsonable(payload), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def source_manifest() -> dict[str, str]:
+    manifest: dict[str, str] = {}
+    for path in SOURCE_FILES:
+        prefix = "analysis" if path.parent.name == "analysis" else "code"
+        manifest[f"{prefix}/{path.name}"] = sha256_file(path)
+    return manifest
+
+
+def make_problem(case: object) -> R26NodeBVP:
+    return R26NodeBVP(
+        case,
+        bulk_operator=compatible_fv_bulk_residual,
+        mass_weights=wall_bounded_control_volume_weights(case.x, case.y),
+    )
+
+
+def attempt_archive(run_dir: Path, attempt: dict[str, object]) -> Path:
+    stem = (
+        f"attempt_{int(attempt['attempt']):03d}_"
+        f"lid_{float(attempt['proposed_lid']):.12g}.npz"
+    )
+    path = run_dir / stem
+    require(path.is_file(), f"accepted seed archive missing: {stem}")
+    return path
+
+
+def load_and_validate_seed(
+    run_dir: Path,
+    attempt: dict[str, object],
+    template: object,
+    raw_tolerance: float,
+) -> tuple[np.ndarray, float, dict[str, object]]:
+    path = attempt_archive(run_dir, attempt)
+    parameter = float(attempt["proposed_lid"])
+    require(bool(attempt.get("accepted")), "selected seed attempt is not accepted")
+    require(
+        float(attempt.get("raw_acceptance_gate")) <= raw_tolerance,
+        "selected seed failed its recorded raw gate",
+    )
+    with np.load(path, allow_pickle=False) as archive:
+        state = np.asarray(archive["state"], dtype=float)
+        x = np.asarray(archive["x"], dtype=float)
+        y = np.asarray(archive["y"], dtype=float)
+        lid = float(np.asarray(archive["lid_velocity"]).item())
+        accepted = bool(np.asarray(archive["accepted"]).item())
+        kn = float(np.asarray(archive["kn_input"]).item())
+        beta = float(np.asarray(archive["beta"]).item())
+    require(accepted, "seed archive is explicitly marked rejected")
+    require(state.shape == (30, 30, 17), "seed state shape is not N30")
+    require(np.array_equal(x, template.x), "seed x coordinates changed")
+    require(np.array_equal(y, template.y), "seed y coordinates changed")
+    require(abs(lid - parameter) <= 2.0e-14, "seed lid metadata mismatch")
+    require(abs(kn - 0.20) <= 2.0e-15, "seed Kn metadata mismatch")
+    require(abs(beta) <= 2.0e-15, "seed beta metadata mismatch")
+    require(state_sha256(state) == attempt.get("state_sha256"), "seed state hash mismatch")
+    case = template.with_lid_velocity(parameter, suffix="arc-seed-validator")
+    problem = make_problem(case)
+    evaluation = problem.evaluate(state)
+    balances = global_balance_diagnostics(state, case)
+    raw_gate = max(
+        evaluation.diagnostics.raw_total_linf,
+        abs(evaluation.diagnostics.held_out_continuity),
+        abs(evaluation.diagnostics.mass_error),
+    )
+    require(raw_gate <= raw_tolerance, "independently recomputed seed raw gate failed")
+    require(evaluation.diagnostics.min_density > 0.0, "seed density is non-positive")
+    require(evaluation.diagnostics.min_temperature > 0.0, "seed temperature is non-positive")
+    require(float(balances["wall_effective_pressure_min"]) > 0.0, "seed wall pressure failed")
+    require(
+        float(balances["momentum_boundary_flux_linf"]) <= 10.0 * raw_tolerance,
+        "seed momentum balance failed",
+    )
+    require(
+        abs(float(balances["internal_energy_balance_error"]))
+        <= 10.0 * raw_tolerance,
+        "seed energy balance failed",
+    )
+    provenance = {
+        "attempt": int(attempt["attempt"]),
+        "parameter": parameter,
+        "archive": str(path.resolve()),
+        "archive_sha256": sha256_file(path),
+        "state_sha256": state_sha256(state),
+        "independent_raw_gate": raw_gate,
+    }
+    return state, parameter, provenance
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--failed-run-dir", type=Path, required=True)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--expected-failed-source-commit", required=True)
+    parser.add_argument(
+        "--target-lid",
+        type=float,
+        default=100.0 / np.sqrt(208.0 * 300.0),
+    )
+    parser.add_argument("--raw-tolerance", type=float, default=1.0e-8)
+    parser.add_argument("--residual-tolerance", type=float, default=1.0e-9)
+    parser.add_argument("--parameter-scale", type=float, default=0.04)
+    parser.add_argument("--initial-step-factor", type=float, default=1.0)
+    parser.add_argument("--minimum-step-factor", type=float, default=0.125)
+    parser.add_argument("--maximum-step-factor", type=float, default=2.0)
+    parser.add_argument("--maximum-attempts", type=int, default=24)
+    parser.add_argument("--maximum-jacobians", type=int, default=7)
+    parser.add_argument("--maximum-objective-evaluations", type=int, default=6000)
+    args = parser.parse_args()
+
+    require(args.failed_run_dir.is_dir(), "failed production directory missing")
+    require(not args.output_dir.exists(), "arclength output directory already exists")
+    require(len(args.expected_failed_source_commit) == 40, "failed commit SHA has wrong length")
+    require(args.maximum_attempts >= 1, "maximum attempts must be positive")
+    require(
+        0.0 < args.minimum_step_factor <= args.initial_step_factor <= args.maximum_step_factor,
+        "arclength step factors must be positive and ordered",
+    )
+    args.output_dir.mkdir(parents=True)
+
+    failed_record_path = args.failed_run_dir / "N30_PRODUCTION_FAILED.json"
+    source_commit_path = args.failed_run_dir / "source_commit.txt"
+    run_dir = args.failed_run_dir / "N30"
+    summary_path = run_dir / "run_summary.json"
+    for path in (failed_record_path, source_commit_path, summary_path):
+        require(path.is_file(), f"required failed-run artifact missing: {path.name}")
+    failed_record = json.loads(failed_record_path.read_text(encoding="utf-8"))
+    failed_summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    source_commit = source_commit_path.read_text(encoding="utf-8").strip()
+    require(failed_record.get("status") == "R26_N30_PRODUCTION_FAILED", "wrong failed-run status")
+    require(
+        failed_record.get("source_commit") == args.expected_failed_source_commit,
+        "failed record source commit mismatch",
+    )
+    require(source_commit == args.expected_failed_source_commit, "source_commit.txt mismatch")
+    require(failed_summary.get("termination") == "minimum_step_rejected", "unexpected failure mode")
+    case_record = failed_summary.get("case", {})
+    require(case_record.get("family") == "jfm-maxwell", "wrong case family")
+    require(int(case_record.get("nodes", -1)) == 30, "failed run is not N30")
+    require(abs(float(case_record.get("kn_input")) - 0.20) <= 2.0e-15, "wrong Kn")
+    require(abs(float(case_record.get("beta"))) <= 2.0e-15, "wrong beta")
+    nonlinear = failed_summary.get("nonlinear_solver", {})
+    for key in ("analytic_mass_jacobian", "secant_predictor", "ser_pseudo_transient"):
+        require(bool(nonlinear.get(key)), f"failed run did not enable {key}")
+
+    template = jfm_maxwell_cavity_case(
+        30,
+        kn=0.20,
+        lid_speed_m_per_s=100.0,
+        wall_temperature_K=300.0,
+        grid_stretch_beta=0.0,
+    )
+    accepted_attempts = [
+        row for row in failed_summary.get("attempts", []) if bool(row.get("accepted"))
+    ]
+    require(len(accepted_attempts) >= 2, "fewer than two accepted N30 seeds")
+    previous_state, previous_parameter, previous_provenance = load_and_validate_seed(
+        run_dir,
+        accepted_attempts[-2],
+        template,
+        args.raw_tolerance,
+    )
+    current_state, current_parameter, current_provenance = load_and_validate_seed(
+        run_dir,
+        accepted_attempts[-1],
+        template,
+        args.raw_tolerance,
+    )
+    require(current_parameter > previous_parameter, "last accepted seed pair is not advancing")
+    require(current_parameter < args.target_lid, "failed run already reached the target")
+
+    metric = ArcLengthMetric(30 * 30 * 17, parameter_scale=args.parameter_scale)
+    transform = LogStateTransform((30, 30, 17))
+    previous_encoded = transform.encode(previous_state)
+    current_encoded = transform.encode(current_state)
+    reference_tangent = normalized_secant_tangent(
+        previous_encoded,
+        previous_parameter,
+        current_encoded,
+        current_parameter,
+        metric,
+    )
+    initial_secant_length = reference_tangent.secant_length
+    step_length = args.initial_step_factor * initial_secant_length
+    minimum_step = args.minimum_step_factor * initial_secant_length
+    maximum_step = args.maximum_step_factor * initial_secant_length
+    controls = ArcLengthCorrectorOptions(
+        residual_tolerance=args.residual_tolerance,
+        raw_tolerance=args.raw_tolerance,
+        parameter_scale=args.parameter_scale,
+        maximum_jacobians=args.maximum_jacobians,
+        maximum_objective_evaluations=args.maximum_objective_evaluations,
+    )
+    manifest = source_manifest()
+    records: list[dict[str, object]] = []
+    termination = "maximum_attempts_reached"
+    landing_record: dict[str, object] | None = None
+
+    for attempt_number in range(1, args.maximum_attempts + 1):
+        started = time.time()
+        result = solve_r26_pseudo_arclength_step(
+            template,
+            previous_state,
+            previous_parameter,
+            current_state,
+            current_parameter,
+            step_length,
+            options=controls,
+            reference_tangent=reference_tangent,
+        )
+        record: dict[str, object] = {
+            "attempt": attempt_number,
+            "from_parameter": current_parameter,
+            "predicted_parameter": result.predicted_parameter,
+            "corrected_parameter": result.parameter,
+            "step_length": step_length,
+            "accepted": result.accepted,
+            "elapsed_seconds": time.time() - started,
+            "raw_acceptance_gate": result.raw_acceptance_gate,
+            "scaled_residual_linf": result.scaled_residual_linf,
+            "arclength_residual": result.arclength_residual,
+            "solver": {
+                "method": "bordered_pseudo_arclength_newton",
+                "message": result.message,
+                "iterations": result.iterations,
+                "jacobian_evaluations": result.jacobian_evaluations,
+                "objective_evaluations": result.objective_evaluations,
+                "invalid_evaluations": result.invalid_evaluations,
+                "last_invalid_error": result.last_invalid_error,
+                "linear_solver": result.linear_solver,
+                "pseudo_transient_steps": result.pseudo_transient_steps,
+                "final_pseudo_time_step": result.final_pseudo_time_step,
+            },
+            "tangent_parameter_component": result.tangent.parameter,
+            "diagnostics": asdict(result.diagnostics),
+            "global_balances": result.global_balances,
+            "state_sha256": state_sha256(result.state),
+            "source_manifest": manifest,
+        }
+        stem = f"arc_attempt_{attempt_number:03d}_lid_{result.parameter:.12g}"
+        np.savez_compressed(
+            args.output_dir / f"{stem}.npz",
+            state=result.state,
+            x=template.x,
+            y=template.y,
+            lid_velocity=result.parameter,
+            kn_input=template.kn,
+            kn_convention=template.kn_convention.value,
+            beta=template.grid_stretch_beta,
+            accepted=result.accepted,
+        )
+        write_json(args.output_dir / f"{stem}.json", record)
+        records.append(record)
+
+        if not result.accepted:
+            step_length *= 0.5
+            if step_length < minimum_step:
+                termination = "minimum_arclength_step_rejected"
+                break
+            continue
+
+        old_current_state = current_state
+        old_current_parameter = current_parameter
+        previous_state = current_state
+        previous_parameter = current_parameter
+        current_state = result.state
+        current_parameter = result.parameter
+        reference_tangent = normalized_secant_tangent(
+            transform.encode(previous_state),
+            previous_parameter,
+            transform.encode(current_state),
+            current_parameter,
+            metric,
+            reference=result.tangent,
+        )
+
+        crossed_target = (
+            (old_current_parameter - args.target_lid)
+            * (current_parameter - args.target_lid)
+            <= 0.0
+            and old_current_parameter != current_parameter
+        )
+        if crossed_target:
+            target_problem = make_problem(
+                template.with_lid_velocity(args.target_lid, suffix="arc-landing")
+            )
+            landing_state = interpolate_bracketed_state(
+                target_problem,
+                old_current_state,
+                old_current_parameter,
+                current_state,
+                current_parameter,
+                args.target_lid,
+            )
+            np.savez_compressed(
+                args.output_dir / "landing_seed.npz",
+                state=landing_state,
+                x=template.x,
+                y=template.y,
+                lid_velocity=args.target_lid,
+                kn_input=template.kn,
+                kn_convention=template.kn_convention.value,
+                beta=template.grid_stretch_beta,
+                predictor_kind="pseudo_arclength_bracket_interpolation",
+                lower_bracket_parameter=old_current_parameter,
+                upper_bracket_parameter=current_parameter,
+            )
+            landing_record = {
+                "target_parameter": args.target_lid,
+                "bracket_parameters": [
+                    old_current_parameter,
+                    current_parameter,
+                ],
+                "landing_state_sha256": state_sha256(landing_state),
+                "landing_file_sha256": sha256_file(
+                    args.output_dir / "landing_seed.npz"
+                ),
+            }
+            termination = "target_bracketed"
+            break
+
+        if result.jacobian_evaluations <= 3:
+            step_length = min(maximum_step, 1.25 * step_length)
+        elif result.jacobian_evaluations >= controls.maximum_jacobians - 1:
+            step_length = max(minimum_step, 0.75 * step_length)
+
+    summary: dict[str, object] = {
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+        "runtime": {
+            "python": platform.python_version(),
+            "numpy": np.__version__,
+            "scipy": scipy.__version__,
+            "platform": platform.platform(),
+        },
+        "case": {
+            "family": "jfm-maxwell",
+            "nodes": 30,
+            "kn_input": 0.20,
+            "kn_convention": "gu_lambda_over_L",
+            "beta": 0.0,
+            "target_lid": args.target_lid,
+        },
+        "failed_run_provenance": {
+            "directory": str(args.failed_run_dir.resolve()),
+            "source_commit": source_commit,
+            "failed_summary_sha256": sha256_file(summary_path),
+            "previous_seed": previous_provenance,
+            "current_seed": current_provenance,
+        },
+        "arclength_controls": {
+            "parameter_scale": args.parameter_scale,
+            "initial_secant_length": initial_secant_length,
+            "initial_step": args.initial_step_factor * initial_secant_length,
+            "minimum_step": minimum_step,
+            "maximum_step": maximum_step,
+            "maximum_attempts": args.maximum_attempts,
+            "maximum_jacobians_per_attempt": args.maximum_jacobians,
+            "maximum_objective_evaluations_per_attempt": args.maximum_objective_evaluations,
+            "pseudo_time_initial": controls.pseudo_time_initial,
+            "pseudo_time_minimum": controls.pseudo_time_minimum,
+            "pseudo_time_maximum": controls.pseudo_time_maximum,
+            "newton_switch_tolerance": controls.newton_switch_tolerance,
+            "raw_tolerance": args.raw_tolerance,
+            "residual_tolerance": args.residual_tolerance,
+        },
+        "attempts": records,
+        "landing": landing_record,
+        "termination": termination,
+        "source_manifest": manifest,
+        "claim_boundary": (
+            "Pseudo-arclength supplies a target predictor only; final fixed-parameter "
+            "R26 correction and independent raw validation remain mandatory."
+        ),
+    }
+    write_json(args.output_dir / "arclength_summary.json", summary)
+    print(
+        json.dumps(
+            {
+                "termination": termination,
+                "accepted_arclength_points": sum(
+                    bool(row["accepted"]) for row in records
+                ),
+                "last_parameter": current_parameter,
+            },
+            sort_keys=True,
+        )
+    )
+    raise SystemExit(0 if termination == "target_bracketed" else 1)
+
+
+if __name__ == "__main__":
+    main()

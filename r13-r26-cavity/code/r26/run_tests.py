@@ -8,6 +8,7 @@ import unittest
 
 from tests import (
     test_r26_bulk_equations,
+    test_r26_arclength,
     test_r26_checkerboard,
     test_r26_diagnostics,
     test_r26_fv_backend,
@@ -26,6 +27,7 @@ def suite() -> unittest.TestSuite:
     result = unittest.TestSuite()
     for module in (
         test_r26_state,
+        test_r26_arclength,
         test_r26_stretched_grid,
         test_r26_tensor_closures,
         test_r26_bulk_equations,
