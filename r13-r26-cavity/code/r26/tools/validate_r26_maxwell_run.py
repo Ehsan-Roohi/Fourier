@@ -44,6 +44,11 @@ def main() -> None:
     parser.add_argument("--expected-beta", type=float, required=True)
     parser.add_argument("--raw-tolerance", type=float, default=1.0e-8)
     parser.add_argument(
+        "--require-modern-globalization",
+        action="store_true",
+        help="require analytic mass, secant prediction, SER-PTC, and the Jacobian cap",
+    )
+    parser.add_argument(
         "--expected-target-lid",
         type=float,
         default=100.0 / math.sqrt(208.0 * 300.0),
@@ -82,6 +87,48 @@ def main() -> None:
 
     attempts = summary.get("attempts", [])
     require(bool(attempts), "no nonlinear attempt recorded")
+    if args.require_modern_globalization:
+        nonlinear = summary.get("nonlinear_solver", {})
+        require(
+            bool(nonlinear.get("analytic_mass_jacobian")),
+            "analytic mass Jacobian was not enabled",
+        )
+        require(bool(nonlinear.get("secant_predictor")), "secant predictor was not enabled")
+        require(bool(nonlinear.get("ser_pseudo_transient")), "SER-PTC was not enabled")
+        jacobian_cap = nonlinear.get("max_jacobians_per_attempt")
+        require(
+            jacobian_cap is not None and 1 <= int(jacobian_cap) <= 5,
+            "Jacobian cap is missing or exceeds five per attempt",
+        )
+        require(
+            any(
+                row.get("predictor", {}).get("kind")
+                == "encoded_secant_mass_preserving"
+                for row in attempts
+            ),
+            "no secant-predicted continuation attempt was recorded",
+        )
+        require(
+            any(
+                int(row.get("solver", {}).get("pseudo_transient_steps", 0)) > 0
+                for row in attempts
+            ),
+            "SER-PTC never produced an accepted nonlinear update",
+        )
+        accepted_hashes: list[str] = []
+        for row in attempts:
+            jacobians = int(row.get("solver", {}).get("jacobian_evaluations", -1))
+            require(0 <= jacobians <= int(jacobian_cap), "per-attempt Jacobian cap violated")
+            if bool(row.get("accepted")):
+                require(
+                    float(row.get("proposed_lid")) > float(row.get("from_lid")),
+                    "accepted gate step did not advance the lid parameter",
+                )
+                accepted_hashes.append(str(row.get("state_sha256")))
+        require(
+            len(accepted_hashes) == len(set(accepted_hashes)),
+            "accepted continuation states contain a zero-update duplicate",
+        )
     final = attempts[-1]
     require(bool(final.get("accepted")), "last nonlinear attempt rejected")
     require(float(final.get("raw_acceptance_gate")) <= args.raw_tolerance, "raw residual gate failed")

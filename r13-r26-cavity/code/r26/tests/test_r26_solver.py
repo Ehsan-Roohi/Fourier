@@ -12,14 +12,17 @@ from r26_cases import (
 )
 from r26_discretization import R26NodeBVP, bilinear_corner_residuals
 from r26_solver import (
+    analytic_mass_jacobian_row,
     EncodedR26MassContinuityObjective,
     EncodedR26Objective,
     EncodedR26RawMassContinuityObjective,
     LogStateTransform,
     interpolate_state_grid,
     jacobian_sparsity,
+    pseudo_transient_diagonal,
     residual_family_row_scales,
     SolveOptions,
+    secant_predict_state,
     solve_r26_bvp,
 )
 from r26_state import NVAR
@@ -250,6 +253,102 @@ def test_colored_fd_sparsity_includes_radius_two_and_global_mass_row() -> None:
     far_corner_q = np.ravel_multi_index((0, 0, 4), problem.shape)
     # On N=5, a radius-two closure stencil reaches the corner from the centre.
     assert pattern[central_delta_row, far_corner_q]
+
+
+def test_analytic_mass_border_matches_directional_difference_and_removes_fd_row() -> None:
+    problem = _problem(nodes=5)
+    transform = LogStateTransform(problem.shape)
+    state = problem.case.equilibrium_state()
+    state[..., 0] = np.exp(np.linspace(-0.1, 0.1, 25).reshape(5, 5))
+    state[..., 0] *= problem.case.mean_density / problem.mean_density(state)
+    encoded = transform.encode(state)
+    mass_row, rho_columns, values = analytic_mass_jacobian_row(
+        problem, transform, encoded
+    )
+    direction = np.zeros(problem.unknown_count)
+    direction[rho_columns] = np.linspace(-0.7, 0.9, rho_columns.size)
+    step = 1.0e-6
+    objective = EncodedR26Objective(problem, transform, penalty=1.0e8)
+    finite_difference = (
+        objective(encoded + step * direction)[mass_row]
+        - objective(encoded - step * direction)[mass_row]
+    ) / (2.0 * step)
+
+    assert np.isclose(np.dot(values, direction[rho_columns]), finite_difference, rtol=2e-9, atol=2e-11)
+    assert jacobian_sparsity(problem, include_mass_border=False)[mass_row].nnz == 0
+
+
+def test_pseudo_transient_diagonal_is_bulk_only_scaled_and_log_aware() -> None:
+    problem = _problem(nodes=5)
+    transform = LogStateTransform(problem.shape)
+    state = problem.case.equilibrium_state()
+    state[2, 1, 0] = 1.2
+    state[2, 1, 3] = 0.8
+    diagonal = pseudo_transient_diagonal(
+        problem, transform, transform.encode(state)
+    ).reshape(problem.shape)
+
+    assert np.all(diagonal[0] == 0.0)
+    assert np.all(diagonal[-1] == 0.0)
+    assert np.all(diagonal[:, 0] == 0.0)
+    assert np.all(diagonal[:, -1] == 0.0)
+    assert diagonal[problem.mass_j, problem.mass_i, 0] == 0.0
+    assert np.isclose(diagonal[2, 1, 0], 1.2 / problem.case.scaling.bulk[0])
+    assert np.isclose(diagonal[2, 1, 3], 0.8 / problem.case.scaling.bulk[3])
+    interior = diagonal[1:-1, 1:-1].copy()
+    interior[problem.mass_j - 1, problem.mass_i - 1, 0] = 1.0
+    assert np.all(interior > 0.0)
+
+
+def test_secant_predictor_preserves_positivity_mass_and_linear_moments() -> None:
+    problem = _problem(nodes=5)
+    previous = problem.case.equilibrium_state()
+    current = previous.copy()
+    current[..., 0] *= np.exp(0.02)
+    current[..., 0] *= problem.case.mean_density / problem.mean_density(current)
+    current[..., 3] *= np.exp(0.03)
+    current[..., 16] = 0.04
+    predicted = secant_predict_state(
+        problem,
+        previous,
+        current,
+        previous_parameter=0.0,
+        current_parameter=0.1,
+        target_parameter=0.2,
+    )
+
+    assert np.min(predicted[..., 0]) > 0.0
+    assert np.min(predicted[..., 3]) > 0.0
+    assert np.isclose(problem.mean_density(predicted), problem.case.mean_density, atol=2e-15)
+    assert np.allclose(predicted[..., 16], 0.08)
+
+
+def test_ser_ptc_uses_a_shift_then_polishes_the_same_mock_root() -> None:
+    problem = _problem(nodes=5)
+    state = problem.case.equilibrium_state()
+    state[2, 2, 16] = 0.1
+    result = solve_r26_bvp(
+        problem,
+        state,
+        options=SolveOptions(
+            method="colored_newton",
+            residual_tolerance=1.0e-10,
+            held_out_continuity_tolerance=1.0e-10,
+            max_iterations=6,
+            analytic_mass_jacobian=True,
+            pseudo_transient=True,
+            pseudo_time_initial=1.0e8,
+            pseudo_time_maximum=1.0e8,
+            newton_switch_tolerance=5.0e-2,
+            max_jacobian_evaluations=2,
+        ),
+    )
+
+    assert result.converged and result.scipy_success
+    assert result.pseudo_transient_steps == 1
+    assert result.jacobian_evaluations == 1
+    assert result.diagnostics.total_linf <= 1.0e-10
+    assert np.array_equal(result.state, problem.case.equilibrium_state())
 
 
 def test_jacobian_row_equilibration_is_componentwise_and_family_local() -> None:

@@ -36,7 +36,13 @@ from r26_cases import (
 from r26_discretization import R26NodeBVP
 from r26_fv_backend import compatible_fv_bulk_residual, wall_bounded_control_volume_weights
 from r26_postprocess import rana_global_metrics
-from r26_solver import SolveOptions, interpolate_state_grid, jacobian_sparsity, solve_r26_bvp
+from r26_solver import (
+    SolveOptions,
+    interpolate_state_grid,
+    jacobian_sparsity,
+    secant_predict_state,
+    solve_r26_bvp,
+)
 from r26_state import STATE_INDEX, planar_state_to_tensors
 from r26_tensor_closures import closures_from_tensors, finite_difference_gradients
 from r26_validation import global_balance_diagnostics, leading_r13_nsf_diagnostics
@@ -114,6 +120,28 @@ def termination_exit_code(termination: str) -> int:
     """Return success only when the requested target root was accepted."""
 
     return 0 if termination == "target_accepted" else 1
+
+
+def continuation_step_after_rejection(
+    attempted_increment: float,
+    minimum_step: float,
+) -> float | None:
+    """Halve a rejected increment but guarantee one exact floor attempt.
+
+    Returning ``None`` means that the rejected proposal was already at (or
+    below, because the target was closer than) the declared floor.  The old
+    driver terminated when a halved step crossed the floor and therefore
+    never tried the floor itself.
+    """
+
+    if not np.isfinite(attempted_increment) or attempted_increment <= 0.0:
+        raise ValueError("attempted increment must be finite and positive")
+    if not np.isfinite(minimum_step) or minimum_step <= 0.0:
+        raise ValueError("minimum step must be finite and positive")
+    tolerance = 16.0 * np.finfo(float).eps * max(1.0, minimum_step)
+    if attempted_increment <= minimum_step + tolerance:
+        return None
+    return max(minimum_step, 0.5 * attempted_increment)
 
 
 def make_problem(case: object) -> R26NodeBVP:
@@ -298,6 +326,30 @@ def main() -> None:
         choices=("colored_newton", "least_squares", "krylov"),
         default="colored_newton",
     )
+    parser.add_argument(
+        "--analytic-mass-jacobian",
+        action="store_true",
+        help="differentiate the dense global-mass border exactly instead of coloring it",
+    )
+    parser.add_argument(
+        "--secant-predictor",
+        action="store_true",
+        help="predict each proposal from the two most recent accepted fixed-grid roots",
+    )
+    parser.add_argument(
+        "--ser-ptc",
+        action="store_true",
+        help="globalize colored Newton with a bulk-only SER pseudo-transient shift",
+    )
+    parser.add_argument("--pseudo-time-initial", type=float, default=1.0e-2)
+    parser.add_argument("--pseudo-time-minimum", type=float, default=1.0e-8)
+    parser.add_argument("--pseudo-time-maximum", type=float, default=1.0e8)
+    parser.add_argument("--newton-switch-tolerance", type=float, default=1.0e-6)
+    parser.add_argument(
+        "--max-jacobians",
+        type=int,
+        help="fail-closed maximum colored Jacobian builds in one continuation attempt",
+    )
     parser.add_argument("--raw-tolerance", type=float, default=1.0e-8)
     parser.add_argument(
         "--solver-tolerance",
@@ -312,6 +364,11 @@ def main() -> None:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
+    if (
+        args.solver != "colored_newton"
+        and (args.analytic_mass_jacobian or args.ser_ptc)
+    ):
+        parser.error("analytic mass Jacobian and SER-PTC require --solver colored_newton")
     if args.case_family == "jfm-maxwell":
         if args.kn_gu is None or args.kn_rana is not None:
             parser.error("jfm-maxwell requires --kn-gu and forbids --kn-rana")
@@ -455,8 +512,17 @@ def main() -> None:
         max_iterations=args.max_nfev,
         max_function_evaluations=args.max_nfev,
         max_objective_evaluations=args.max_objective_evaluations,
+        analytic_mass_jacobian=args.analytic_mass_jacobian,
+        pseudo_transient=args.ser_ptc,
+        pseudo_time_initial=args.pseudo_time_initial,
+        pseudo_time_minimum=args.pseudo_time_minimum,
+        pseudo_time_maximum=args.pseudo_time_maximum,
+        newton_switch_tolerance=args.newton_switch_tolerance,
+        max_jacobian_evaluations=args.max_jacobians,
     )
     attempts: list[dict[str, object]] = []
+    previous_accepted_state: np.ndarray | None = None
+    previous_accepted_lid: float | None = None
     step = float(args.initial_step)
     attempt = 0
     termination = (
@@ -477,8 +543,42 @@ def main() -> None:
             proposed = min(current_lid + step, target_lid)
         case = base.with_lid_velocity(proposed, suffix=f"attempt{attempt:03d}")
         problem = make_problem(case)
+        solve_seed = state
+        predictor: dict[str, object] = {"kind": "last_accepted_state"}
+        if (
+            args.secant_predictor
+            and not reconciling_this_attempt
+            and previous_accepted_state is not None
+            and previous_accepted_lid is not None
+            and proposed > current_lid
+        ):
+            factor = (proposed - current_lid) / (current_lid - previous_accepted_lid)
+            if factor <= 2.0:
+                solve_seed = secant_predict_state(
+                    problem,
+                    previous_accepted_state,
+                    state,
+                    previous_parameter=previous_accepted_lid,
+                    current_parameter=current_lid,
+                    target_parameter=proposed,
+                )
+                predictor = {
+                    "kind": "encoded_secant_mass_preserving",
+                    "previous_lid": previous_accepted_lid,
+                    "current_lid": current_lid,
+                    "target_lid": proposed,
+                    "extrapolation_factor": factor,
+                    "seed_state_sha256": state_sha256(solve_seed),
+                    "seed_mass_error": problem.mass_constraint(solve_seed),
+                }
+            else:
+                predictor = {
+                    "kind": "last_accepted_state",
+                    "secant_skipped": "extrapolation_factor_above_two",
+                    "extrapolation_factor": factor,
+                }
         started = time.time()
-        result = solve_r26_bvp(problem, state, options=options)
+        result = solve_r26_bvp(problem, solve_seed, options=options)
         balances = global_balance_diagnostics(result.state, case)
         raw_gate = max(
             result.diagnostics.raw_total_linf,
@@ -506,9 +606,13 @@ def main() -> None:
                 "scipy_success": result.scipy_success,
                 "message": result.message,
                 "function_evaluations": result.function_evaluations,
+                "jacobian_evaluations": result.jacobian_evaluations,
+                "pseudo_transient_steps": result.pseudo_transient_steps,
+                "final_pseudo_time_step": result.final_pseudo_time_step,
                 "invalid_evaluations": result.invalid_evaluations,
                 "last_invalid_error": result.last_invalid_error,
             },
+            "predictor": predictor,
             "diagnostics": asdict(result.diagnostics),
             "raw_acceptance_gate": raw_gate,
             "global_balances": balances,
@@ -535,13 +639,18 @@ def main() -> None:
         write_json(args.output_dir / f"{stem}.json", report)
         attempts.append(report)
         if accepted:
+            old_accepted_state = state.copy()
+            old_accepted_lid = current_lid
             state = result.state.copy()
             current_lid = proposed
             state_accepted_on_target_grid = True
             if reconciling_this_attempt:
                 needs_reconciliation = False
-            elif attempt > 1:
-                step = min(args.initial_step, 1.4 * step)
+            else:
+                previous_accepted_state = old_accepted_state
+                previous_accepted_lid = old_accepted_lid
+                if attempt > 1:
+                    step = min(args.initial_step, 1.4 * step)
             if not needs_reconciliation and current_lid >= target_lid - 1.0e-15:
                 termination = "target_accepted"
                 break
@@ -552,10 +661,14 @@ def main() -> None:
             if current_lid == 0.0 and proposed == min(args.smoke_lid, target_lid):
                 termination = "smoke_rejected"
                 break
-            step *= 0.5
-            if step < args.minimum_step:
+            next_step = continuation_step_after_rejection(
+                proposed - current_lid,
+                args.minimum_step,
+            )
+            if next_step is None:
                 termination = "minimum_step_rejected"
                 break
+            step = next_step
 
     final_case = base.with_lid_velocity(current_lid, suffix="last-accepted")
     final_payload: dict[str, object] = {
@@ -595,6 +708,18 @@ def main() -> None:
             "provenance": base.provenance,
         },
         "input_provenance": provenance,
+        "nonlinear_solver": {
+            "method": args.solver,
+            "analytic_mass_jacobian": args.analytic_mass_jacobian,
+            "secant_predictor": args.secant_predictor,
+            "ser_pseudo_transient": args.ser_ptc,
+            "pseudo_time_initial": args.pseudo_time_initial,
+            "pseudo_time_minimum": args.pseudo_time_minimum,
+            "pseudo_time_maximum": args.pseudo_time_maximum,
+            "newton_switch_tolerance": args.newton_switch_tolerance,
+            "max_jacobians_per_attempt": args.max_jacobians,
+            "raw_acceptance_tolerance": args.raw_tolerance,
+        },
         "termination": termination,
         "attempts": attempts,
         "validation_status": (

@@ -12,7 +12,7 @@ import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from scipy.optimize import OptimizeResult, least_squares, root
 from scipy.optimize._numdiff import approx_derivative
-from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse import coo_matrix, csr_matrix, diags
 from scipy.sparse.linalg import lsmr, splu
 
 from r26_cases import CavityCase
@@ -75,6 +75,15 @@ class SolveOptions:
     line_search: str = "armijo"
     display: bool = False
     invalid_penalty: float = 1.0e8
+    analytic_mass_jacobian: bool = False
+    pseudo_transient: bool = False
+    pseudo_time_initial: float = 1.0e-2
+    pseudo_time_minimum: float = 1.0e-8
+    pseudo_time_maximum: float = 1.0e8
+    pseudo_time_ser_exponent: float = 1.0
+    pseudo_time_growth_limit: float = 2.0
+    newton_switch_tolerance: float = 1.0e-6
+    max_jacobian_evaluations: int | None = None
 
     def __post_init__(self) -> None:
         if self.method not in {"krylov", "least_squares", "colored_newton"}:
@@ -85,6 +94,26 @@ class SolveOptions:
             raise ValueError("solver iteration limits must be positive")
         if self.max_objective_evaluations is not None and self.max_objective_evaluations < 1:
             raise ValueError("objective evaluation limit must be positive when supplied")
+        if (self.analytic_mass_jacobian or self.pseudo_transient) and self.method != "colored_newton":
+            raise ValueError(
+                "analytic mass Jacobian and pseudo-transient modes require colored_newton"
+            )
+        pseudo_values = (
+            self.pseudo_time_initial,
+            self.pseudo_time_minimum,
+            self.pseudo_time_maximum,
+            self.pseudo_time_ser_exponent,
+            self.pseudo_time_growth_limit,
+            self.newton_switch_tolerance,
+        )
+        if not all(np.isfinite(value) and value > 0.0 for value in pseudo_values):
+            raise ValueError("pseudo-time controls and Newton switch tolerance must be positive")
+        if not self.pseudo_time_minimum <= self.pseudo_time_initial <= self.pseudo_time_maximum:
+            raise ValueError("pseudo_time_initial must lie within the declared pseudo-time bounds")
+        if self.pseudo_time_growth_limit < 1.0:
+            raise ValueError("pseudo_time_growth_limit must be at least one")
+        if self.max_jacobian_evaluations is not None and self.max_jacobian_evaluations < 1:
+            raise ValueError("Jacobian evaluation limit must be positive when supplied")
 
 
 @dataclass(frozen=True)
@@ -101,6 +130,9 @@ class R26SolveResult:
     invalid_evaluations: int
     last_invalid_error: str | None
     solver_method: str
+    jacobian_evaluations: int = 0
+    pseudo_transient_steps: int = 0
+    final_pseudo_time_step: float | None = None
 
 
 class _ObjectiveEvaluationLimitReached(RuntimeError):
@@ -298,7 +330,118 @@ def residual_family_row_scales(
     return np.maximum(np.nan_to_num(scales.ravel(), nan=floor), floor)
 
 
-def jacobian_sparsity(problem: R26NodeBVP, *, stencil_radius: int = 2) -> csr_matrix:
+def analytic_mass_jacobian_row(
+    problem: R26NodeBVP,
+    transform: LogStateTransform,
+    encoded_state: np.ndarray,
+) -> tuple[int, np.ndarray, np.ndarray]:
+    """Return the exact bordered-mass row in logarithmic solver coordinates.
+
+    The square BVP replaces one continuity equation by
+
+    ``sum(weights * rho) - target_mean_density = 0``.
+
+    Density is represented by ``log(rho)``, so the only nonzero derivatives
+    are ``weights * rho / mass_scale``.  Supplying this dense border exactly
+    prevents it from forcing every density column into a different finite-
+    difference color while leaving the nonlinear residual unchanged.
+    """
+
+    if transform.shape != problem.shape:
+        raise ValueError("transform and problem shapes must match")
+    state = transform.decode(encoded_state)
+    mass_row = int(
+        np.ravel_multi_index((problem.mass_j, problem.mass_i, 0), problem.shape)
+    )
+    rho_columns = np.arange(0, problem.unknown_count, NVAR, dtype=np.int64)
+    values = (
+        problem.mass_weights.ravel()
+        * state[..., 0].ravel()
+        / float(problem.case.scaling.mass)
+    )
+    if not np.isfinite(values).all():
+        raise FloatingPointError("analytic mass Jacobian row is non-finite")
+    return mass_row, rho_columns, values
+
+
+def pseudo_transient_diagonal(
+    problem: R26NodeBVP,
+    transform: LogStateTransform,
+    encoded_state: np.ndarray,
+) -> np.ndarray:
+    """Return the scaled pseudo-mass diagonal for physical bulk rows only.
+
+    Smooth-wall, extrapolation, corner, and global-mass equations remain
+    algebraic constraints.  On the interior, the diagonal represents
+    ``dU/d(encoded U)`` divided by the audited bulk residual scaling.  Hence
+    logarithmic density and temperature coordinates receive factors ``rho``
+    and ``T`` rather than an arbitrary identity shift.
+    """
+
+    if transform.shape != problem.shape:
+        raise ValueError("transform and problem shapes must match")
+    state = transform.decode(encoded_state)
+    coordinate_derivative = np.ones(problem.shape)
+    coordinate_derivative[..., 0] = state[..., 0]
+    coordinate_derivative[..., 3] = state[..., 3]
+    bulk_scale = np.asarray(problem.case.scaling.bulk, dtype=float)
+    if bulk_scale.shape != (NVAR,) or not np.isfinite(bulk_scale).all() or np.any(bulk_scale <= 0.0):
+        raise ValueError("bulk residual scaling must contain 17 positive finite entries")
+    diagonal = np.zeros(problem.shape)
+    diagonal[1:-1, 1:-1] = coordinate_derivative[1:-1, 1:-1] / bulk_scale
+    diagonal[problem.mass_j, problem.mass_i, 0] = 0.0
+    return diagonal.ravel()
+
+
+def secant_predict_state(
+    problem: R26NodeBVP,
+    previous_state: np.ndarray,
+    current_state: np.ndarray,
+    *,
+    previous_parameter: float,
+    current_parameter: float,
+    target_parameter: float,
+    maximum_extrapolation: float = 2.0,
+) -> np.ndarray:
+    """Extrapolate two accepted roots in encoded coordinates.
+
+    Logarithmic rho/T coordinates preserve positivity.  The predicted density
+    is then renormalized with the problem's exact quadrature weights, so the
+    global mass border is satisfied before the nonlinear solve begins.
+    """
+
+    values = (previous_parameter, current_parameter, target_parameter)
+    if not all(np.isfinite(value) for value in values):
+        raise ValueError("continuation parameters must be finite")
+    spacing = float(current_parameter - previous_parameter)
+    advance = float(target_parameter - current_parameter)
+    if spacing <= 0.0 or advance < 0.0:
+        raise ValueError("secant predictor requires monotone accepted parameters")
+    factor = advance / spacing
+    if not np.isfinite(maximum_extrapolation) or maximum_extrapolation <= 0.0:
+        raise ValueError("maximum_extrapolation must be finite and positive")
+    if factor > maximum_extrapolation:
+        raise ValueError(
+            f"secant extrapolation factor {factor:.6g} exceeds {maximum_extrapolation:.6g}"
+        )
+    transform = LogStateTransform(problem.shape)
+    previous = transform.encode(previous_state)
+    current = transform.encode(current_state)
+    lower, upper = transform.least_squares_bounds()
+    predicted = transform.decode(np.clip(current + factor * (current - previous), lower, upper))
+    mean_density = problem.mean_density(predicted)
+    if not np.isfinite(mean_density) or mean_density <= 0.0:
+        raise FloatingPointError("secant predictor produced invalid mean density")
+    predicted[..., 0] *= problem.case.mean_density / mean_density
+    return validate_planar_state(predicted)
+
+
+def jacobian_sparsity(
+    problem: R26NodeBVP,
+    *,
+    stencil_radius: int = 2,
+    include_mass_border: bool = True,
+) -> csr_matrix:
     """Conservative dependency pattern for colored finite differences.
 
     The raw R26 rows contain a derivative of a closure that itself contains
@@ -327,15 +470,27 @@ def jacobian_sparsity(problem: R26NodeBVP, *, stencil_radius: int = 2) -> csr_ma
             rows.append(np.repeat(output_rows, cols.size))
             columns.append(np.tile(cols, output_rows.size))
     # The continuity row replaced by the integral mass constraint sees every
-    # rho node, including all four explicitly modelled corners.
+    # rho node, including all four explicitly modelled corners.  When the row
+    # is supplied analytically, remove it completely from the finite-
+    # difference pattern so it cannot serialize the density colors.
     mass_row = int(np.ravel_multi_index((problem.mass_j, problem.mass_i, 0), problem.shape))
     rho_columns = np.arange(0, problem.unknown_count, nv, dtype=np.int64)
-    rows.append(np.full(rho_columns.shape, mass_row, dtype=np.int64))
-    columns.append(rho_columns)
+    if include_mass_border:
+        rows.append(np.full(rho_columns.shape, mass_row, dtype=np.int64))
+        columns.append(rho_columns)
     row = np.concatenate(rows)
     column = np.concatenate(columns)
     data = np.ones(row.size, dtype=bool)
-    return coo_matrix((data, (row, column)), shape=(problem.unknown_count, problem.unknown_count)).tocsr()
+    pattern = coo_matrix(
+        (data, (row, column)),
+        shape=(problem.unknown_count, problem.unknown_count),
+    ).tocsr()
+    if not include_mass_border:
+        pattern = pattern.tolil()
+        pattern[mass_row, :] = False
+        pattern = pattern.tocsr()
+        pattern.eliminate_zeros()
+    return pattern
 
 
 def solve_r26_bvp(
@@ -355,6 +510,9 @@ def solve_r26_bvp(
     transform = LogStateTransform(problem.shape)
     x0 = transform.encode(initial_state)
     objective = EncodedR26Objective(problem, transform, options.invalid_penalty)
+    jacobian_evaluations = 0
+    pseudo_transient_steps = 0
+    final_pseudo_time_step: float | None = None
 
     if options.method == "krylov":
         scipy_result: OptimizeResult = root(
@@ -397,14 +555,16 @@ def solve_r26_bvp(
         iterations = int(getattr(result, "njev", 0) or 0)
         evaluations = int(result.nfev)
     else:
-        # Near equilibrium the steady R26 cavity system is almost linear.
-        # One explicitly formed, conservatively colored finite-difference
-        # Jacobian plus sparse Newton is substantially more deterministic
-        # than an unpreconditioned Krylov solve.  The Jacobian is refreshed
-        # after every accepted nonlinear step; a backtracking merit search
-        # prevents silently accepting an invalid or residual-growing update.
+        # The steady equations are unchanged.  Optional SER pseudo-transient
+        # continuation only globalizes the route to the same algebraic root;
+        # it shifts physical bulk rows while wall, corner, and mass rows stay
+        # algebraic.  Once the residual enters the declared Newton basin the
+        # shift is removed exactly and the final root is polished by Newton.
         lower, upper = transform.least_squares_bounds()
-        pattern = jacobian_sparsity(problem)
+        pattern = jacobian_sparsity(
+            problem,
+            include_mass_border=not options.analytic_mass_jacobian,
+        )
         encoded = x0.copy()
         evaluations = 0
 
@@ -423,67 +583,188 @@ def solve_r26_bvp(
         message = "colored sparse Newton iteration limit reached"
         iterations = 0
         jacobian = None
-        factorization = None
+        newton_factorization = None
         chord_steps = 0
+        force_jacobian_refresh = False
+        pseudo_time_step = float(options.pseudo_time_initial)
         try:
             for iteration in range(1, options.max_iterations + 1):
                 iterations = iteration
                 residual_linf = float(np.max(np.abs(residual), initial=0.0))
                 if residual_linf <= options.residual_tolerance:
                     success = True
-                    message = "colored sparse Newton residual tolerance reached"
+                    message = (
+                        "SER pseudo-transient/Newton residual tolerance reached"
+                        if options.pseudo_transient
+                        else "colored sparse Newton residual tolerance reached"
+                    )
                     break
-                if factorization is None or chord_steps >= 3:
-                    jacobian = approx_derivative(
-                        counted,
-                        encoded,
-                        method="2-point",
-                        # R26 high-order moments can be many orders of magnitude
-                        # smaller than unity.  A relative-only perturbation then
-                        # rounds away and corrupts the colored Jacobian precisely
-                        # in the wall-layer rows that control grid reconciliation.
-                        # Use the already audited absolute floor while retaining
-                        # proportional growth for large encoded coordinates.
-                        abs_step=fv_absolute_difference_step(encoded),
-                        bounds=(lower, upper),
-                        sparsity=pattern,
+                use_pseudo_transient = bool(
+                    options.pseudo_transient
+                    and residual_linf > options.newton_switch_tolerance
+                )
+                chord_limit = 12 if use_pseudo_transient else 3
+                if (
+                    jacobian is None
+                    or force_jacobian_refresh
+                    or chord_steps >= chord_limit
+                ):
+                    if (
+                        options.max_jacobian_evaluations is not None
+                        and jacobian_evaluations >= options.max_jacobian_evaluations
+                    ):
+                        message = (
+                            "colored sparse Newton Jacobian-evaluation limit reached "
+                            f"({options.max_jacobian_evaluations})"
+                        )
+                        break
+
+                    # R26 high-order moments can be many orders of magnitude
+                    # smaller than unity.  A relative-only perturbation rounds
+                    # away there, so retain the audited absolute perturbation.
+                    derivative_kwargs: dict[str, object] = {
+                        "method": "2-point",
+                        "abs_step": fv_absolute_difference_step(encoded),
+                        "bounds": (lower, upper),
+                        "sparsity": pattern,
+                    }
+                    if options.analytic_mass_jacobian:
+                        mass_row, rho_columns, mass_values = analytic_mass_jacobian_row(
+                            problem, transform, encoded
+                        )
+
+                        def counted_without_mass_border(vector: np.ndarray) -> np.ndarray:
+                            values = counted(vector).copy()
+                            values[mass_row] = 0.0
+                            return values
+
+                        finite_difference_base = residual.copy()
+                        finite_difference_base[mass_row] = 0.0
+                        derivative_kwargs["f0"] = finite_difference_base
+                        finite_difference_jacobian = approx_derivative(
+                            counted_without_mass_border,
+                            encoded,
+                            **derivative_kwargs,
+                        ).tolil()
+                        finite_difference_jacobian[mass_row, :] = 0.0
+                        finite_difference_jacobian[mass_row, rho_columns] = mass_values
+                        jacobian = finite_difference_jacobian.tocsc()
+                    else:
+                        jacobian = approx_derivative(
+                            counted,
+                            encoded,
+                            **derivative_kwargs,
+                        ).tocsc()
+                    jacobian_evaluations += 1
+                    newton_factorization = None
+                    chord_steps = 0
+                    force_jacobian_refresh = False
+
+                assert jacobian is not None
+                linear_matrix = jacobian
+                factorization = None
+                if use_pseudo_transient:
+                    pseudo_diagonal = pseudo_transient_diagonal(
+                        problem, transform, encoded
+                    )
+                    linear_matrix = (
+                        jacobian + diags(pseudo_diagonal / pseudo_time_step, format="csc")
                     ).tocsc()
                     try:
-                        factorization = splu(jacobian)
+                        factorization = splu(linear_matrix)
                     except RuntimeError:
                         factorization = None
-                    chord_steps = 0
+                else:
+                    if newton_factorization is None:
+                        try:
+                            newton_factorization = splu(jacobian)
+                        except RuntimeError:
+                            newton_factorization = None
+                    factorization = newton_factorization
                 try:
                     if factorization is None:
                         raise RuntimeError("sparse LU unavailable")
                     direction = factorization.solve(-residual)
-                    linear_solver = "splu"
+                    linear_solver = "splu-ptc" if use_pseudo_transient else "splu"
                 except RuntimeError:
-                    assert jacobian is not None
-                    direction = lsmr(jacobian, -residual, atol=1.0e-12, btol=1.0e-12)[0]
-                    linear_solver = "lsmr-fallback"
+                    direction = lsmr(
+                        linear_matrix,
+                        -residual,
+                        atol=1.0e-12,
+                        btol=1.0e-12,
+                    )[0]
+                    linear_solver = (
+                        "lsmr-ptc-fallback"
+                        if use_pseudo_transient
+                        else "lsmr-fallback"
+                    )
                 if not np.isfinite(direction).all():
                     message = f"{linear_solver} produced a non-finite Newton direction"
                     break
                 merit = 0.5 * float(np.dot(residual, residual))
+                old_residual_linf = residual_linf
                 alpha = 1.0
                 accepted_step = False
                 while alpha >= 2.0**-20:
                     trial = np.clip(encoded + alpha * direction, lower, upper)
                     trial_residual = counted(trial)
                     trial_merit = 0.5 * float(np.dot(trial_residual, trial_residual))
-                    if np.isfinite(trial_merit) and trial_merit < merit * (1.0 - 1.0e-4 * alpha):
+                    sufficient_decrease = (
+                        trial_merit < merit
+                        if use_pseudo_transient
+                        else trial_merit < merit * (1.0 - 1.0e-4 * alpha)
+                    )
+                    if np.isfinite(trial_merit) and sufficient_decrease:
                         encoded = trial
                         residual = trial_residual
                         accepted_step = True
                         chord_steps += 1
-                        if trial_merit > 0.25 * merit:
-                            factorization = None
+                        if use_pseudo_transient:
+                            pseudo_transient_steps += 1
+                            new_residual_linf = float(
+                                np.max(np.abs(residual), initial=0.0)
+                            )
+                            ser_ratio = old_residual_linf / max(
+                                new_residual_linf,
+                                np.finfo(float).tiny,
+                            )
+                            growth = min(
+                                options.pseudo_time_growth_limit,
+                                max(
+                                    0.25,
+                                    ser_ratio ** options.pseudo_time_ser_exponent,
+                                ),
+                            )
+                            pseudo_time_step = float(
+                                np.clip(
+                                    pseudo_time_step * growth,
+                                    options.pseudo_time_minimum,
+                                    options.pseudo_time_maximum,
+                                )
+                            )
+                        if (
+                            (not use_pseudo_transient and trial_merit > 0.25 * merit)
+                            or (use_pseudo_transient and trial_merit > 0.95 * merit)
+                        ):
+                            force_jacobian_refresh = True
                         break
                     alpha *= 0.5
                 if not accepted_step:
+                    if use_pseudo_transient:
+                        if pseudo_time_step > options.pseudo_time_minimum:
+                            pseudo_time_step = max(
+                                options.pseudo_time_minimum,
+                                0.25 * pseudo_time_step,
+                            )
+                            continue
+                        message = (
+                            "SER pseudo-transient line search failed at minimum "
+                            f"pseudo-time step after {linear_solver}"
+                        )
+                        break
                     if chord_steps > 0:
-                        factorization = None
+                        force_jacobian_refresh = True
+                        newton_factorization = None
                         chord_steps = 0
                         continue
                     message = f"colored sparse Newton line search failed after {linear_solver}"
@@ -492,12 +773,19 @@ def solve_r26_bvp(
                 residual_linf = float(np.max(np.abs(residual), initial=0.0))
                 if residual_linf <= options.residual_tolerance:
                     success = True
-                    message = "colored sparse Newton residual tolerance reached"
+                    message = (
+                        "SER pseudo-transient/Newton residual tolerance reached"
+                        if options.pseudo_transient
+                        else "colored sparse Newton residual tolerance reached"
+                    )
         except _ObjectiveEvaluationLimitReached:
             message = (
                 "colored sparse Newton objective-evaluation limit reached "
                 f"({options.max_objective_evaluations})"
             )
+        final_pseudo_time_step = (
+            pseudo_time_step if options.pseudo_transient else None
+        )
         scipy_result = OptimizeResult(
             x=encoded,
             success=success,
@@ -542,6 +830,9 @@ def solve_r26_bvp(
         invalid_evaluations=objective.invalid_evaluations,
         last_invalid_error=objective.last_invalid_error,
         solver_method=options.method,
+        jacobian_evaluations=jacobian_evaluations,
+        pseudo_transient_steps=pseudo_transient_steps,
+        final_pseudo_time_step=final_pseudo_time_step,
     )
 
 
@@ -671,6 +962,7 @@ def load_restart(path: str | Path) -> tuple[np.ndarray, dict[str, object]]:
 
 
 __all__ = [
+    "analytic_mass_jacobian_row",
     "EncodedR26Objective",
     "EncodedR26MassContinuityObjective",
     "EncodedR26RawMassContinuityObjective",
@@ -680,8 +972,10 @@ __all__ = [
     "interpolate_state_grid",
     "jacobian_sparsity",
     "load_restart",
+    "pseudo_transient_diagonal",
     "residual_family_row_scales",
     "save_restart",
+    "secant_predict_state",
     "solve_lid_continuation",
     "solve_r26_bvp",
 ]
