@@ -44,8 +44,19 @@ BALANCED_METRIC_GATE_SLURM = (
 BALANCED_METRIC_GATE_SUBMIT = (
     R26_ROOT / "hpc" / "submit_r26_kn020_balanced_metric_gate_n8_n16.sh"
 )
+BALANCED_METRIC_GATE_VALIDATOR = (
+    R26_ROOT / "tools" / "validate_r26_balanced_metric_gate.py"
+)
+N30_BALANCED_ARCLENGTH_SLURM = (
+    R26_ROOT / "hpc" / "r26_kn020_n30_balanced_arclength_rescue.slurm"
+)
+N30_BALANCED_ARCLENGTH_SUBMIT = (
+    R26_ROOT / "hpc" / "submit_r26_kn020_n30_balanced_arclength_rescue.sh"
+)
 sys.path.insert(0, str(CODE))
 
+from analysis.run_jfm_observability_continuation import jsonable as continuation_jsonable  # noqa: E402
+from analysis.run_r26_pseudo_arclength_rescue import jsonable as arclength_jsonable  # noqa: E402
 from r26_cases import (  # noqa: E402
     KnudsenConvention,
     SQRT_2_OVER_PI,
@@ -53,6 +64,7 @@ from r26_cases import (  # noqa: E402
     jfm_maxwell_cavity_case,
 )
 from analysis.run_r26_balanced_metric_gate import jsonable as metric_gate_jsonable  # noqa: E402
+from r26_postprocess import _jsonable as postprocess_jsonable  # noqa: E402
 from r26_tensor_closures import closure_coefficients  # noqa: E402
 from r26_wall_conditions import WallParameters  # noqa: E402
 
@@ -72,11 +84,53 @@ class MaxwellContract(unittest.TestCase):
     def test_balanced_metric_gate_preserves_boolean_json_types(self) -> None:
         # ``bool`` subclasses ``int`` in Python, so this is an ordering-sensitive
         # regression test for the fail-closed n30_authorized contract.
-        self.assertIs(metric_gate_jsonable(False), False)
-        self.assertIs(metric_gate_jsonable(True), True)
-        self.assertIs(metric_gate_jsonable(np.bool_(False)), False)
-        self.assertEqual(metric_gate_jsonable(0), 0)
-        self.assertIs(type(metric_gate_jsonable(0)), int)
+        serializers = (
+            metric_gate_jsonable,
+            arclength_jsonable,
+            continuation_jsonable,
+            postprocess_jsonable,
+        )
+        for serializer in serializers:
+            with self.subTest(serializer=serializer.__module__):
+                self.assertIs(serializer(False), False)
+                self.assertIs(serializer(True), True)
+                self.assertIs(serializer(np.bool_(False)), False)
+                self.assertEqual(serializer(0), 0)
+                self.assertIs(type(serializer(0)), int)
+
+    def test_n30_balanced_arclength_is_gate_locked_and_fail_closed(self) -> None:
+        script = N30_BALANCED_ARCLENGTH_SLURM.read_text()
+        submit = N30_BALANCED_ARCLENGTH_SUBMIT.read_text()
+        self.assertIn(
+            'EXPECTED_BALANCED_GATE_REF="93fd4b55b8932bcfedb36f1c66e90b443e7744e2"',
+            script,
+        )
+        self.assertIn(
+            'EXPECTED_PRODUCTION_REF="312ee29799e5fdb4340d1146af5c408d72563d49"',
+            script,
+        )
+        self.assertIn(
+            'EXPECTED_FAILED_ARC_REF="380a5cb05f0620813c255a086ca899b4051ea2ae"',
+            script,
+        )
+        self.assertIn("R26_BALANCED_GATE_DIR", script)
+        self.assertIn("validate_r26_balanced_metric_gate.py", script)
+        self.assertIn("--parameter-metric-fraction 0.5", script)
+        self.assertNotIn("--parameter-scale", script)
+        self.assertIn("--failed-arclength-dir", script)
+        self.assertIn("arc_attempt_003_lid_0.370215710658.npz", script)
+        self.assertIn("--maximum-attempts 24", script)
+        self.assertIn("--maximum-jacobians 7", script)
+        self.assertIn("--maximum-objective-evaluations 6000", script)
+        self.assertIn("--expected-parameter-metric-fraction 0.5", script)
+        self.assertIn("validate_r26_maxwell_run.py", script)
+        self.assertIn("N30_BALANCED_ARCLENGTH_RESCUE_PASSED.json", script)
+        self.assertIn("N30_BALANCED_ARCLENGTH_RESCUE_FAILED.json", script)
+        self.assertIn('"n30_target_accepted": False', script)
+        self.assertNotIn("--nodes 32", script)
+        self.assertIn("r26_kn020_n30_balanced_arclength_rescue.slurm", submit)
+        self.assertTrue(N30_BALANCED_ARCLENGTH_SLURM.is_file())
+        self.assertTrue(N30_BALANCED_ARCLENGTH_SUBMIT.is_file())
 
     def test_balanced_arclength_metric_gate_is_n8_n16_only(self) -> None:
         script = BALANCED_METRIC_GATE_SLURM.read_text()
@@ -143,8 +197,39 @@ class MaxwellContract(unittest.TestCase):
                 N30_PRODUCTION_SLURM,
                 N30_ARCLENGTH_SLURM,
                 N30_ARCLENGTH_RESUME_SLURM,
+                N30_BALANCED_ARCLENGTH_SLURM,
             },
         )
+
+    def test_balanced_metric_validator_is_standalone_and_fail_closed(self) -> None:
+        environment = dict(__import__("os").environ)
+        environment.pop("PYTHONPATH", None)
+        result = subprocess.run(
+            [sys.executable, str(BALANCED_METRIC_GATE_VALIDATOR), "--help"],
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--expected-source-commit", result.stdout)
+        self.assertIn("--expected-parameter-fraction", result.stdout)
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(BALANCED_METRIC_GATE_VALIDATOR),
+                    directory,
+                    "--expected-source-commit",
+                    "93fd4b55b8932bcfedb36f1c66e90b443e7744e2",
+                ],
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("required gate record missing", result.stderr)
 
     def test_n30_arclength_rescue_is_bounded_source_locked_and_fail_closed(self) -> None:
         script = N30_ARCLENGTH_SLURM.read_text()

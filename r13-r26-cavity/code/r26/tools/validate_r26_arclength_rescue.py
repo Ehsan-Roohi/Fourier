@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--raw-tolerance", type=float, default=1.0e-8)
     parser.add_argument("--expected-target-lid", type=float, required=True)
     parser.add_argument("--expected-failed-arclength-source-commit")
+    parser.add_argument("--expected-parameter-metric-fraction", type=float)
     args = parser.parse_args()
 
     arc_summary_path = args.arclength_dir / "arclength_summary.json"
@@ -87,23 +88,82 @@ def main() -> None:
             int(controls.get("newton_chord_limit", -1)) == 3,
             "Newton chord limit changed",
         )
+        if args.expected_parameter_metric_fraction is None:
+            require(
+                math.isclose(
+                    float(controls.get("minimum_step")),
+                    float(resume.get("prior_minimum_step")),
+                    rel_tol=0.0,
+                    abs_tol=2.0e-15,
+                ),
+                "resume silently changed the prior minimum step",
+            )
+            require(
+                math.isclose(
+                    float(controls.get("maximum_step")),
+                    float(resume.get("prior_accepted_step")),
+                    rel_tol=0.0,
+                    abs_tol=2.0e-15,
+                ),
+                "resume maximum step is not the prior accepted step",
+            )
+    if args.expected_parameter_metric_fraction is not None:
+        expected_fraction = args.expected_parameter_metric_fraction
+        require(
+            0.1 <= expected_fraction <= 0.9,
+            "expected parameter metric fraction is outside the admissible interval",
+        )
+        require(
+            controls.get("parameter_scale_mode") == "secant_balanced",
+            "arclength metric was not secant-balanced",
+        )
+        require(
+            math.isclose(
+                float(controls.get("requested_parameter_metric_fraction")),
+                expected_fraction,
+                rel_tol=0.0,
+                abs_tol=2.0e-14,
+            ),
+            "requested parameter metric fraction mismatch",
+        )
+        state_fraction = float(controls.get("initial_state_metric_fraction"))
+        parameter_fraction = float(controls.get("initial_parameter_metric_fraction"))
+        require(
+            math.isclose(parameter_fraction, expected_fraction, rel_tol=0.0, abs_tol=2.0e-14),
+            "initial parameter metric fraction mismatch",
+        )
+        require(
+            math.isclose(
+                state_fraction,
+                1.0 - expected_fraction,
+                rel_tol=0.0,
+                abs_tol=2.0e-14,
+            ),
+            "initial state metric fraction mismatch",
+        )
+        initial_secant = float(controls.get("initial_secant_length"))
+        initial_step = float(controls.get("initial_step"))
+        require(
+            math.isclose(initial_step, initial_secant, rel_tol=0.0, abs_tol=2.0e-15),
+            "balanced run did not rebuild its initial step from the new secant",
+        )
         require(
             math.isclose(
                 float(controls.get("minimum_step")),
-                float(resume.get("prior_minimum_step")),
+                0.125 * initial_secant,
                 rel_tol=0.0,
                 abs_tol=2.0e-15,
             ),
-            "resume silently changed the prior minimum step",
+            "balanced run minimum step is not one eighth of the new secant",
         )
         require(
             math.isclose(
                 float(controls.get("maximum_step")),
-                float(resume.get("prior_accepted_step")),
+                2.0 * initial_secant,
                 rel_tol=0.0,
                 abs_tol=2.0e-15,
             ),
-            "resume maximum step is not the prior accepted step",
+            "balanced run maximum step is not twice the new secant",
         )
     attempts = arc.get("attempts", [])
     require(bool(attempts), "no arclength attempts recorded")
@@ -133,6 +193,22 @@ def main() -> None:
                 max(int(item.get("jacobian_evaluations", -1)) for item in trace)
                 <= maximum_jacobians,
                 "trace exceeded the Jacobian cap",
+            )
+        if args.expected_parameter_metric_fraction is not None:
+            parameter_fraction = float(row.get("parameter_metric_fraction", -1.0))
+            state_fraction = float(row.get("state_metric_fraction", -1.0))
+            require(
+                0.1 <= parameter_fraction <= 0.9,
+                "attempt parameter metric fraction left the admissible interval",
+            )
+            require(
+                math.isclose(
+                    parameter_fraction + state_fraction,
+                    1.0,
+                    rel_tol=0.0,
+                    abs_tol=2.0e-14,
+                ),
+                "attempt metric fractions do not sum to one",
             )
         if bool(row.get("accepted")):
             require(

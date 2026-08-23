@@ -144,3 +144,22 @@ segment on both grids with the balanced bordered corrector, and independently
 checks the raw physical residual.  Its pass record explicitly leaves
 `n30_authorized` false.  No further N30 rescue should be prepared until this
 new N16 metric gate passes.
+
+## Gate-approved N30 balanced-arclength stage
+
+Job `63544304` completed the source-locked N8/N16 gate at commit
+`93fd4b55b8932bcfedb36f1c66e90b443e7744e2`.  Both replays assigned exactly
+one half of the squared secant norm to the state and one half to lid speed.
+The independent raw gates were `9.177797410941935e-12` on N8 and
+`4.175583750293255e-11` on N16.  The gate therefore validates the metric and
+corrector combination; it does not itself claim an N30 solution.
+
+`r26_kn020_n30_balanced_arclength_rescue.slurm` is the next bounded stage.  It
+requires that exact gate, the failed fresh-N30 record, and the independently
+accepted N30 root at `lid=0.37021571065841696`.  It does not reuse any
+absolute step from the old degenerate metric.  The initial, minimum, and
+maximum steps are rebuilt as `1`, `1/8`, and `2` times the accepted secant in
+the balanced metric.  Each attempt remains capped at seven Jacobian builds,
+80 nonlinear updates, and 6000 objective evaluations, with no more than 24
+attempts.  Success still requires a target bracket, exactly one fixed-lid
+correction at 100 m/s, and the unchanged independent Maxwell raw gate.
