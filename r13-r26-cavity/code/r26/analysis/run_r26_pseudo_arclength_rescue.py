@@ -107,6 +107,19 @@ def attempt_archive(run_dir: Path, attempt: dict[str, object]) -> Path:
     return path
 
 
+def arclength_attempt_archive(
+    run_dir: Path,
+    attempt: dict[str, object],
+) -> Path:
+    stem = (
+        f"arc_attempt_{int(attempt['attempt']):03d}_"
+        f"lid_{float(attempt['corrected_parameter']):.12g}.npz"
+    )
+    path = run_dir / stem
+    require(path.is_file(), f"accepted arclength seed archive missing: {stem}")
+    return path
+
+
 def load_and_validate_seed(
     run_dir: Path,
     attempt: dict[str, object],
@@ -169,11 +182,77 @@ def load_and_validate_seed(
     return state, parameter, provenance
 
 
+def load_and_validate_arclength_seed(
+    run_dir: Path,
+    attempt: dict[str, object],
+    template: object,
+    raw_tolerance: float,
+) -> tuple[np.ndarray, float, dict[str, object]]:
+    path = arclength_attempt_archive(run_dir, attempt)
+    parameter = float(attempt["corrected_parameter"])
+    require(bool(attempt.get("accepted")), "selected arclength seed is not accepted")
+    require(
+        float(attempt.get("raw_acceptance_gate")) <= raw_tolerance,
+        "selected arclength seed failed its recorded raw gate",
+    )
+    with np.load(path, allow_pickle=False) as archive:
+        state = np.asarray(archive["state"], dtype=float)
+        x = np.asarray(archive["x"], dtype=float)
+        y = np.asarray(archive["y"], dtype=float)
+        lid = float(np.asarray(archive["lid_velocity"]).item())
+        accepted = bool(np.asarray(archive["accepted"]).item())
+        kn = float(np.asarray(archive["kn_input"]).item())
+        beta = float(np.asarray(archive["beta"]).item())
+    require(accepted, "arclength seed archive is explicitly marked rejected")
+    require(state.shape == (30, 30, 17), "arclength seed shape is not N30")
+    require(np.array_equal(x, template.x), "arclength seed x coordinates changed")
+    require(np.array_equal(y, template.y), "arclength seed y coordinates changed")
+    require(abs(lid - parameter) <= 2.0e-14, "arclength seed lid mismatch")
+    require(abs(kn - 0.20) <= 2.0e-15, "arclength seed Kn mismatch")
+    require(abs(beta) <= 2.0e-15, "arclength seed beta mismatch")
+    require(
+        state_sha256(state) == attempt.get("state_sha256"),
+        "arclength seed state hash mismatch",
+    )
+    case = template.with_lid_velocity(parameter, suffix="arc-resume-validator")
+    evaluation = make_problem(case).evaluate(state)
+    balances = global_balance_diagnostics(state, case)
+    raw_gate = max(
+        evaluation.diagnostics.raw_total_linf,
+        abs(evaluation.diagnostics.held_out_continuity),
+        abs(evaluation.diagnostics.mass_error),
+    )
+    require(raw_gate <= raw_tolerance, "recomputed arclength seed raw gate failed")
+    require(evaluation.diagnostics.min_density > 0.0, "resume density is non-positive")
+    require(evaluation.diagnostics.min_temperature > 0.0, "resume temperature is non-positive")
+    require(float(balances["wall_effective_pressure_min"]) > 0.0, "resume wall pressure failed")
+    require(
+        float(balances["momentum_boundary_flux_linf"]) <= 10.0 * raw_tolerance,
+        "resume momentum balance failed",
+    )
+    require(
+        abs(float(balances["internal_energy_balance_error"]))
+        <= 10.0 * raw_tolerance,
+        "resume energy balance failed",
+    )
+    provenance = {
+        "attempt": int(attempt["attempt"]),
+        "parameter": parameter,
+        "archive": str(path.resolve()),
+        "archive_sha256": sha256_file(path),
+        "state_sha256": state_sha256(state),
+        "independent_raw_gate": raw_gate,
+    }
+    return state, parameter, provenance
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--failed-run-dir", type=Path, required=True)
+    parser.add_argument("--failed-arclength-dir", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-failed-source-commit", required=True)
+    parser.add_argument("--expected-failed-arclength-source-commit")
     parser.add_argument(
         "--target-lid",
         type=float,
@@ -186,14 +265,33 @@ def main() -> None:
     parser.add_argument("--minimum-step-factor", type=float, default=0.125)
     parser.add_argument("--maximum-step-factor", type=float, default=2.0)
     parser.add_argument("--maximum-attempts", type=int, default=24)
+    parser.add_argument("--maximum-iterations", type=int, default=80)
     parser.add_argument("--maximum-jacobians", type=int, default=7)
     parser.add_argument("--maximum-objective-evaluations", type=int, default=6000)
+    parser.add_argument("--pseudo-transient-chord-limit", type=int, default=12)
+    parser.add_argument("--newton-chord-limit", type=int, default=3)
     args = parser.parse_args()
 
     require(args.failed_run_dir.is_dir(), "failed production directory missing")
+    require(
+        (args.failed_arclength_dir is None)
+        == (args.expected_failed_arclength_source_commit is None),
+        "failed arclength directory and expected commit must be supplied together",
+    )
+    if args.failed_arclength_dir is not None:
+        require(args.failed_arclength_dir.is_dir(), "failed arclength directory missing")
+        require(
+            len(args.expected_failed_arclength_source_commit) == 40,
+            "failed arclength commit SHA has wrong length",
+        )
     require(not args.output_dir.exists(), "arclength output directory already exists")
     require(len(args.expected_failed_source_commit) == 40, "failed commit SHA has wrong length")
     require(args.maximum_attempts >= 1, "maximum attempts must be positive")
+    require(args.maximum_iterations >= 1, "maximum iterations must be positive")
+    require(
+        args.pseudo_transient_chord_limit >= 1 and args.newton_chord_limit >= 1,
+        "chord limits must be positive",
+    )
     require(
         0.0 < args.minimum_step_factor <= args.initial_step_factor <= args.maximum_step_factor,
         "arclength step factors must be positive and ordered",
@@ -236,18 +334,117 @@ def main() -> None:
         row for row in failed_summary.get("attempts", []) if bool(row.get("accepted"))
     ]
     require(len(accepted_attempts) >= 2, "fewer than two accepted N30 seeds")
-    previous_state, previous_parameter, previous_provenance = load_and_validate_seed(
-        run_dir,
-        accepted_attempts[-2],
-        template,
-        args.raw_tolerance,
-    )
-    current_state, current_parameter, current_provenance = load_and_validate_seed(
-        run_dir,
-        accepted_attempts[-1],
-        template,
-        args.raw_tolerance,
-    )
+    resume_provenance: dict[str, object] | None = None
+    if args.failed_arclength_dir is None:
+        previous_state, previous_parameter, previous_provenance = (
+            load_and_validate_seed(
+                run_dir,
+                accepted_attempts[-2],
+                template,
+                args.raw_tolerance,
+            )
+        )
+        current_state, current_parameter, current_provenance = load_and_validate_seed(
+            run_dir,
+            accepted_attempts[-1],
+            template,
+            args.raw_tolerance,
+        )
+    else:
+        failed_arc_record_path = (
+            args.failed_arclength_dir / "N30_ARCLENGTH_RESCUE_FAILED.json"
+        )
+        failed_arc_source_path = args.failed_arclength_dir / "source_commit.txt"
+        prior_arc_dir = args.failed_arclength_dir / "ARCLENGTH"
+        prior_arc_summary_path = prior_arc_dir / "arclength_summary.json"
+        for path in (
+            failed_arc_record_path,
+            failed_arc_source_path,
+            prior_arc_summary_path,
+        ):
+            require(path.is_file(), f"required failed-arclength artifact missing: {path.name}")
+        failed_arc_record = json.loads(
+            failed_arc_record_path.read_text(encoding="utf-8")
+        )
+        prior_arc_summary = json.loads(
+            prior_arc_summary_path.read_text(encoding="utf-8")
+        )
+        failed_arc_source = failed_arc_source_path.read_text(encoding="utf-8").strip()
+        require(
+            failed_arc_record.get("status") == "R26_N30_ARCLENGTH_RESCUE_FAILED",
+            "wrong failed arclength status",
+        )
+        require(
+            failed_arc_record.get("source_commit")
+            == args.expected_failed_arclength_source_commit,
+            "failed arclength record source commit mismatch",
+        )
+        require(
+            failed_arc_source == args.expected_failed_arclength_source_commit,
+            "failed arclength source_commit.txt mismatch",
+        )
+        require(
+            failed_arc_record.get("failed_production_commit")
+            == args.expected_failed_source_commit,
+            "failed arclength production provenance mismatch",
+        )
+        require(
+            prior_arc_summary.get("termination")
+            == "minimum_arclength_step_rejected",
+            "unexpected failed arclength termination",
+        )
+        prior_case = prior_arc_summary.get("case", {})
+        require(int(prior_case.get("nodes", -1)) == 30, "failed arclength is not N30")
+        require(abs(float(prior_case.get("kn_input")) - 0.20) <= 2.0e-15, "wrong resume Kn")
+        require(abs(float(prior_case.get("beta"))) <= 2.0e-15, "wrong resume beta")
+        prior_failed_provenance = prior_arc_summary.get("failed_run_provenance", {})
+        require(
+            prior_failed_provenance.get("source_commit")
+            == args.expected_failed_source_commit,
+            "resume production source mismatch",
+        )
+        require(
+            prior_failed_provenance.get("failed_summary_sha256")
+            == sha256_file(summary_path),
+            "resume production summary hash mismatch",
+        )
+        prior_accepted = [
+            row
+            for row in prior_arc_summary.get("attempts", [])
+            if bool(row.get("accepted"))
+        ]
+        require(prior_accepted, "failed arclength run has no accepted resume root")
+        previous_state, previous_parameter, previous_provenance = (
+            load_and_validate_seed(
+                run_dir,
+                accepted_attempts[-1],
+                template,
+                args.raw_tolerance,
+            )
+        )
+        current_state, current_parameter, current_provenance = (
+            load_and_validate_arclength_seed(
+                prior_arc_dir,
+                prior_accepted[-1],
+                template,
+                args.raw_tolerance,
+            )
+        )
+        prior_controls = prior_arc_summary.get("arclength_controls", {})
+        prior_accepted_step = float(prior_accepted[-1]["step_length"])
+        prior_minimum_step = float(prior_controls["minimum_step"])
+        require(
+            0.0 < prior_minimum_step <= prior_accepted_step,
+            "invalid prior arclength step bounds",
+        )
+        resume_provenance = {
+            "directory": str(args.failed_arclength_dir.resolve()),
+            "source_commit": failed_arc_source,
+            "summary_sha256": sha256_file(prior_arc_summary_path),
+            "accepted_seed": current_provenance,
+            "prior_minimum_step": prior_minimum_step,
+            "prior_accepted_step": prior_accepted_step,
+        }
     require(current_parameter > previous_parameter, "last accepted seed pair is not advancing")
     require(current_parameter < args.target_lid, "failed run already reached the target")
 
@@ -263,15 +460,24 @@ def main() -> None:
         metric,
     )
     initial_secant_length = reference_tangent.secant_length
-    step_length = args.initial_step_factor * initial_secant_length
-    minimum_step = args.minimum_step_factor * initial_secant_length
-    maximum_step = args.maximum_step_factor * initial_secant_length
+    if resume_provenance is None:
+        step_length = args.initial_step_factor * initial_secant_length
+        minimum_step = args.minimum_step_factor * initial_secant_length
+        maximum_step = args.maximum_step_factor * initial_secant_length
+    else:
+        step_length = float(resume_provenance["prior_accepted_step"])
+        minimum_step = float(resume_provenance["prior_minimum_step"])
+        maximum_step = step_length
+    declared_initial_step = step_length
     controls = ArcLengthCorrectorOptions(
         residual_tolerance=args.residual_tolerance,
         raw_tolerance=args.raw_tolerance,
         parameter_scale=args.parameter_scale,
+        maximum_iterations=args.maximum_iterations,
         maximum_jacobians=args.maximum_jacobians,
         maximum_objective_evaluations=args.maximum_objective_evaluations,
+        pseudo_transient_chord_limit=args.pseudo_transient_chord_limit,
+        newton_chord_limit=args.newton_chord_limit,
     )
     manifest = source_manifest()
     records: list[dict[str, object]] = []
@@ -302,7 +508,7 @@ def main() -> None:
             "scaled_residual_linf": result.scaled_residual_linf,
             "arclength_residual": result.arclength_residual,
             "solver": {
-                "method": "bordered_pseudo_arclength_newton",
+                "method": "bordered_pseudo_arclength_chord_ser_ptc",
                 "message": result.message,
                 "iterations": result.iterations,
                 "jacobian_evaluations": result.jacobian_evaluations,
@@ -312,6 +518,7 @@ def main() -> None:
                 "linear_solver": result.linear_solver,
                 "pseudo_transient_steps": result.pseudo_transient_steps,
                 "final_pseudo_time_step": result.final_pseudo_time_step,
+                "iteration_trace": result.iteration_trace,
             },
             "tangent_parameter_component": result.tangent.parameter,
             "diagnostics": asdict(result.diagnostics),
@@ -429,15 +636,19 @@ def main() -> None:
             "previous_seed": previous_provenance,
             "current_seed": current_provenance,
         },
+        "failed_arclength_provenance": resume_provenance,
         "arclength_controls": {
             "parameter_scale": args.parameter_scale,
             "initial_secant_length": initial_secant_length,
-            "initial_step": args.initial_step_factor * initial_secant_length,
+            "initial_step": declared_initial_step,
             "minimum_step": minimum_step,
             "maximum_step": maximum_step,
             "maximum_attempts": args.maximum_attempts,
+            "maximum_iterations_per_attempt": args.maximum_iterations,
             "maximum_jacobians_per_attempt": args.maximum_jacobians,
             "maximum_objective_evaluations_per_attempt": args.maximum_objective_evaluations,
+            "pseudo_transient_chord_limit": args.pseudo_transient_chord_limit,
+            "newton_chord_limit": args.newton_chord_limit,
             "pseudo_time_initial": controls.pseudo_time_initial,
             "pseudo_time_minimum": controls.pseudo_time_minimum,
             "pseudo_time_maximum": controls.pseudo_time_maximum,

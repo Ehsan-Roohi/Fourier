@@ -25,6 +25,7 @@ def main() -> None:
     parser.add_argument("target_dir", type=Path)
     parser.add_argument("--raw-tolerance", type=float, default=1.0e-8)
     parser.add_argument("--expected-target-lid", type=float, required=True)
+    parser.add_argument("--expected-failed-arclength-source-commit")
     args = parser.parse_args()
 
     arc_summary_path = args.arclength_dir / "arclength_summary.json"
@@ -63,6 +64,47 @@ def main() -> None:
     )
     require(1 <= maximum_jacobians <= 7, "arclength Jacobian cap is invalid")
     require(maximum_objectives == 6000, "arclength objective cap changed")
+    if args.expected_failed_arclength_source_commit is not None:
+        require(
+            len(args.expected_failed_arclength_source_commit) == 40,
+            "failed arclength commit SHA has wrong length",
+        )
+        resume = arc.get("failed_arclength_provenance") or {}
+        require(
+            resume.get("source_commit")
+            == args.expected_failed_arclength_source_commit,
+            "failed arclength resume source mismatch",
+        )
+        require(
+            int(controls.get("maximum_iterations_per_attempt", -1)) == 80,
+            "arclength nonlinear-iteration cap changed",
+        )
+        require(
+            int(controls.get("pseudo_transient_chord_limit", -1)) == 12,
+            "pseudo-transient chord limit changed",
+        )
+        require(
+            int(controls.get("newton_chord_limit", -1)) == 3,
+            "Newton chord limit changed",
+        )
+        require(
+            math.isclose(
+                float(controls.get("minimum_step")),
+                float(resume.get("prior_minimum_step")),
+                rel_tol=0.0,
+                abs_tol=2.0e-15,
+            ),
+            "resume silently changed the prior minimum step",
+        )
+        require(
+            math.isclose(
+                float(controls.get("maximum_step")),
+                float(resume.get("prior_accepted_step")),
+                rel_tol=0.0,
+                abs_tol=2.0e-15,
+            ),
+            "resume maximum step is not the prior accepted step",
+        )
     attempts = arc.get("attempts", [])
     require(bool(attempts), "no arclength attempts recorded")
     require(any(bool(row.get("accepted")) for row in attempts), "no arclength point accepted")
@@ -76,6 +118,22 @@ def main() -> None:
             int(solver.get("objective_evaluations", -1)) <= maximum_objectives,
             "arclength objective cap exceeded",
         )
+        if args.expected_failed_arclength_source_commit is not None:
+            require(
+                solver.get("method") == "bordered_pseudo_arclength_chord_ser_ptc",
+                "resume did not use the chord-reuse corrector",
+            )
+            trace = solver.get("iteration_trace", [])
+            require(bool(trace), "resume attempt has no nonlinear iteration trace")
+            require(
+                len(trace) == int(solver.get("iterations", -1)),
+                "resume iteration trace is incomplete",
+            )
+            require(
+                max(int(item.get("jacobian_evaluations", -1)) for item in trace)
+                <= maximum_jacobians,
+                "trace exceeded the Jacobian cap",
+            )
         if bool(row.get("accepted")):
             require(
                 float(row.get("raw_acceptance_gate")) <= args.raw_tolerance,

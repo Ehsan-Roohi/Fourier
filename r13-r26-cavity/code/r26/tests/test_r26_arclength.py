@@ -116,8 +116,11 @@ def test_bracket_interpolation_preserves_positivity_and_exact_mass() -> None:
 
 def test_arclength_controls_are_bounded_and_fail_closed() -> None:
     controls = ArcLengthCorrectorOptions()
+    assert controls.maximum_iterations == 80
     assert controls.maximum_jacobians == 7
     assert controls.maximum_objective_evaluations == 6000
+    assert controls.pseudo_transient_chord_limit == 12
+    assert controls.newton_chord_limit == 3
     assert controls.pseudo_time_minimum <= controls.pseudo_time_initial
     try:
         ArcLengthCorrectorOptions(pseudo_time_minimum=2.0)
@@ -125,3 +128,9 @@ def test_arclength_controls_are_bounded_and_fail_closed() -> None:
         assert "pseudo-time limits" in str(error)
     else:
         raise AssertionError("invalid pseudo-time ordering was accepted")
+    try:
+        ArcLengthCorrectorOptions(maximum_iterations=0)
+    except ValueError as error:
+        assert "work limits" in str(error)
+    else:
+        raise AssertionError("zero nonlinear-iteration limit was accepted")

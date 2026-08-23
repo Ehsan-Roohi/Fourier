@@ -216,8 +216,11 @@ class ArcLengthCorrectorOptions:
     parameter_minimum: float = 0.0
     parameter_maximum: float = 0.8
     parameter_difference_step: float = 1.0e-6
+    maximum_iterations: int = 80
     maximum_jacobians: int = 7
     maximum_objective_evaluations: int = 6000
+    pseudo_transient_chord_limit: int = 12
+    newton_chord_limit: int = 3
     minimum_line_search_factor: float = 2.0**-18
     invalid_penalty: float = 1.0e8
     pseudo_time_initial: float = 1.0
@@ -251,7 +254,14 @@ class ArcLengthCorrectorOptions:
             and self.parameter_minimum < self.parameter_maximum
         ):
             raise ValueError("parameter bounds must be finite and ordered")
-        if self.maximum_jacobians < 1 or self.maximum_objective_evaluations < 1:
+        integer_limits = (
+            self.maximum_iterations,
+            self.maximum_jacobians,
+            self.maximum_objective_evaluations,
+            self.pseudo_transient_chord_limit,
+            self.newton_chord_limit,
+        )
+        if any(value < 1 for value in integer_limits):
             raise ValueError("arclength work limits must be positive")
         if not (
             self.pseudo_time_minimum
@@ -284,6 +294,7 @@ class ArcLengthCorrectorResult:
     linear_solver: str | None
     pseudo_transient_steps: int
     final_pseudo_time_step: float
+    iteration_trace: tuple[dict[str, object], ...]
 
 
 def _make_problem(case: CavityCase) -> R26NodeBVP:
@@ -363,15 +374,68 @@ def solve_r26_pseudo_arclength_step(
             return controls.invalid_penalty * sign * magnitude
 
     residual = counted(encoded, parameter)
-    message = "pseudo-arclength Jacobian-evaluation limit reached"
+    message = "pseudo-arclength nonlinear-iteration limit reached"
     last_linear_solver: str | None = None
     iterations = 0
     jacobian_evaluations = 0
     final_arc_residual = float("inf")
     pseudo_time_step = float(controls.pseudo_time_initial)
     pseudo_transient_steps = 0
+    physical_jacobian = None
+    parameter_column = None
+    chord_steps = 0
+    force_jacobian_refresh = False
+    iteration_trace: list[dict[str, object]] = []
+    trace_parameter_before = parameter
+    trace_scaled_before = float(np.max(np.abs(residual), initial=0.0))
+    trace_arc_before = float("inf")
+    trace_jacobian_refreshed = False
+    trace_chord_before = 0
+    trace_use_pseudo_transient = False
+    trace_pseudo_time_before = pseudo_time_step
+
+    def append_trace(
+        *,
+        iteration: int,
+        parameter_before: float,
+        scaled_before: float,
+        arc_before: float,
+        jacobian_refreshed: bool,
+        chord_before: int,
+        use_pseudo_transient: bool,
+        pseudo_time_before: float,
+        line_search_factor: float | None,
+        accepted_step: bool,
+        merit_ratio: float,
+        outcome: str,
+    ) -> None:
+        iteration_trace.append(
+            {
+                "iteration": iteration,
+                "parameter_before": parameter_before,
+                "scaled_residual_linf_before": scaled_before,
+                "arclength_residual_before": arc_before,
+                "jacobian_evaluations": jacobian_evaluations,
+                "jacobian_refreshed": jacobian_refreshed,
+                "chord_steps_before": chord_before,
+                "pseudo_transient": use_pseudo_transient,
+                "pseudo_time_step_before": pseudo_time_before,
+                "line_search_factor": line_search_factor,
+                "step_accepted": accepted_step,
+                "parameter_after": parameter,
+                "scaled_residual_linf_after": float(
+                    np.max(np.abs(residual), initial=0.0)
+                ),
+                "arclength_residual_after": final_arc_residual,
+                "pseudo_time_step_after": pseudo_time_step,
+                "merit_ratio": merit_ratio,
+                "linear_solver": last_linear_solver,
+                "outcome": outcome,
+            }
+        )
+
     try:
-        for iteration in range(1, controls.maximum_jacobians + 1):
+        for iteration in range(1, controls.maximum_iterations + 1):
             iterations = iteration
             scaled_linf = float(np.max(np.abs(residual), initial=0.0))
             arc_value, arc_row, arc_parameter = arclength_constraint(
@@ -384,173 +448,345 @@ def solve_r26_pseudo_arclength_step(
                 scale=step_length,
             )
             final_arc_residual = arc_value
+            trace_parameter_before = parameter
+            trace_scaled_before = scaled_linf
+            trace_arc_before = arc_value
+            trace_jacobian_refreshed = False
+            trace_chord_before = chord_steps
+            trace_use_pseudo_transient = False
+            trace_pseudo_time_before = pseudo_time_step
             if (
                 scaled_linf <= controls.residual_tolerance
                 and abs(arc_value) <= controls.arclength_tolerance
             ):
                 message = "pseudo-arclength residual tolerance reached"
+                append_trace(
+                    iteration=iteration,
+                    parameter_before=parameter,
+                    scaled_before=scaled_linf,
+                    arc_before=arc_value,
+                    jacobian_refreshed=False,
+                    chord_before=chord_steps,
+                    use_pseudo_transient=False,
+                    pseudo_time_before=pseudo_time_step,
+                    line_search_factor=None,
+                    accepted_step=False,
+                    merit_ratio=1.0,
+                    outcome="residual_tolerance_reached",
+                )
                 break
 
-            problem = _make_problem(
-                case_template.with_lid_velocity(parameter, suffix="arc-jacobian")
+            combined_linf = max(scaled_linf, abs(arc_value))
+            use_pseudo_transient = (
+                combined_linf > controls.newton_switch_tolerance
             )
-            mass_row, density_columns, mass_values = analytic_mass_jacobian_row(
-                problem,
-                transform,
-                encoded,
+            chord_limit = (
+                controls.pseudo_transient_chord_limit
+                if use_pseudo_transient
+                else controls.newton_chord_limit
             )
-
-            def without_mass_border(vector: np.ndarray) -> np.ndarray:
-                values = counted(vector, parameter).copy()
-                values[mass_row] = 0.0
-                return values
-
-            finite_difference_base = residual.copy()
-            finite_difference_base[mass_row] = 0.0
-            physical_jacobian = approx_derivative(
-                without_mass_border,
-                encoded,
-                method="2-point",
-                abs_step=fv_absolute_difference_step(encoded),
-                bounds=(lower, upper),
-                sparsity=pattern,
-                f0=finite_difference_base,
-            ).tolil()
-            physical_jacobian[mass_row, :] = 0.0
-            physical_jacobian[mass_row, density_columns] = mass_values
-            physical_jacobian = physical_jacobian.tocsc()
-
-            parameter_step = controls.parameter_difference_step * max(
-                1.0,
-                abs(parameter),
+            refresh_jacobian = bool(
+                physical_jacobian is None
+                or parameter_column is None
+                or force_jacobian_refresh
+                or chord_steps >= chord_limit
             )
-            plus = counted(encoded, parameter + parameter_step)
-            if parameter - parameter_step >= controls.parameter_minimum:
-                minus = counted(encoded, parameter - parameter_step)
-                parameter_column = (plus - minus) / (2.0 * parameter_step)
-            else:
-                parameter_column = (plus - residual) / parameter_step
-            parameter_column[mass_row] = 0.0
-            jacobian_evaluations += 1
-            merit = 0.5 * (
-                float(np.dot(residual, residual)) + arc_value**2
-            )
-            accepted_line_search = False
-            old_linf = max(scaled_linf, abs(arc_value))
-            use_pseudo_transient = old_linf > controls.newton_switch_tolerance
-            while True:
-                linear_jacobian = physical_jacobian
-                if use_pseudo_transient:
-                    pseudo_diagonal = pseudo_transient_diagonal(
-                        problem,
-                        transform,
-                        encoded,
+            chord_steps_before = chord_steps
+            trace_chord_before = chord_steps_before
+            trace_use_pseudo_transient = use_pseudo_transient
+            if refresh_jacobian:
+                if jacobian_evaluations >= controls.maximum_jacobians:
+                    message = (
+                        "pseudo-arclength Jacobian-evaluation limit reached "
+                        f"({controls.maximum_jacobians})"
                     )
-                    linear_jacobian = (
-                        physical_jacobian
-                        + diags(pseudo_diagonal / pseudo_time_step, format="csc")
-                    ).tocsc()
-                state_direction, parameter_direction, last_linear_solver = (
-                    solve_bordered_newton_direction(
-                        linear_jacobian,
-                        parameter_column,
-                        arc_row,
-                        arc_parameter,
-                        residual,
-                        arc_value,
+                    append_trace(
+                        iteration=iteration,
+                        parameter_before=parameter,
+                        scaled_before=scaled_linf,
+                        arc_before=arc_value,
+                        jacobian_refreshed=False,
+                        chord_before=chord_steps,
+                        use_pseudo_transient=use_pseudo_transient,
+                        pseudo_time_before=pseudo_time_step,
+                        line_search_factor=None,
+                        accepted_step=False,
+                        merit_ratio=1.0,
+                        outcome="jacobian_evaluation_limit_reached",
+                    )
+                    break
+
+                jacobian_parameter = float(parameter)
+                jacobian_encoded = encoded.copy()
+                jacobian_residual = residual.copy()
+                jacobian_problem = _make_problem(
+                    case_template.with_lid_velocity(
+                        jacobian_parameter,
+                        suffix="arc-jacobian",
                     )
                 )
-                factor = 1.0
-                while factor >= controls.minimum_line_search_factor:
-                    trial_parameter = parameter + factor * parameter_direction
-                    if not (
-                        controls.parameter_minimum
-                        <= trial_parameter
-                        <= controls.parameter_maximum
-                    ):
-                        factor *= 0.5
-                        continue
-                    trial_encoded = np.clip(
-                        encoded + factor * state_direction,
-                        lower,
-                        upper,
+                mass_row, density_columns, mass_values = analytic_mass_jacobian_row(
+                    jacobian_problem,
+                    transform,
+                    jacobian_encoded,
+                )
+
+                def without_mass_border(vector: np.ndarray) -> np.ndarray:
+                    values = counted(vector, jacobian_parameter).copy()
+                    values[mass_row] = 0.0
+                    return values
+
+                finite_difference_base = jacobian_residual.copy()
+                finite_difference_base[mass_row] = 0.0
+                finite_difference_jacobian = approx_derivative(
+                    without_mass_border,
+                    jacobian_encoded,
+                    method="2-point",
+                    abs_step=fv_absolute_difference_step(jacobian_encoded),
+                    bounds=(lower, upper),
+                    sparsity=pattern,
+                    f0=finite_difference_base,
+                ).tolil()
+                finite_difference_jacobian[mass_row, :] = 0.0
+                finite_difference_jacobian[mass_row, density_columns] = mass_values
+                physical_jacobian = finite_difference_jacobian.tocsc()
+
+                parameter_step = controls.parameter_difference_step * max(
+                    1.0,
+                    abs(jacobian_parameter),
+                )
+                can_step_forward = (
+                    jacobian_parameter + parameter_step
+                    <= controls.parameter_maximum
+                )
+                can_step_backward = (
+                    jacobian_parameter - parameter_step
+                    >= controls.parameter_minimum
+                )
+                if can_step_forward and can_step_backward:
+                    plus = counted(
+                        jacobian_encoded,
+                        jacobian_parameter + parameter_step,
                     )
-                    trial_residual = counted(trial_encoded, trial_parameter)
-                    trial_arc, _, _ = arclength_constraint(
-                        trial_encoded,
-                        trial_parameter,
-                        predicted_encoded,
-                        predicted_parameter,
-                        tangent,
-                        metric,
-                        scale=step_length,
+                    minus = counted(
+                        jacobian_encoded,
+                        jacobian_parameter - parameter_step,
                     )
-                    trial_merit = 0.5 * (
-                        float(np.dot(trial_residual, trial_residual))
-                        + trial_arc**2
+                    parameter_column = (plus - minus) / (2.0 * parameter_step)
+                elif can_step_forward:
+                    plus = counted(
+                        jacobian_encoded,
+                        jacobian_parameter + parameter_step,
                     )
-                    sufficient_decrease = (
-                        trial_merit < merit
-                        if use_pseudo_transient
-                        else trial_merit < merit * (1.0 - 1.0e-4 * factor)
+                    parameter_column = (plus - jacobian_residual) / parameter_step
+                elif can_step_backward:
+                    minus = counted(
+                        jacobian_encoded,
+                        jacobian_parameter - parameter_step,
                     )
-                    if np.isfinite(trial_merit) and sufficient_decrease:
-                        encoded = trial_encoded
-                        parameter = float(trial_parameter)
-                        residual = trial_residual
-                        final_arc_residual = trial_arc
-                        accepted_line_search = True
-                        if use_pseudo_transient:
-                            pseudo_transient_steps += 1
-                            new_linf = max(
-                                float(np.max(np.abs(residual), initial=0.0)),
-                                abs(trial_arc),
-                            )
-                            ser_ratio = old_linf / max(
-                                new_linf,
-                                np.finfo(float).tiny,
-                            )
-                            growth = min(
-                                controls.pseudo_time_growth_limit,
-                                max(
-                                    0.25,
-                                    ser_ratio
-                                    ** controls.pseudo_time_ser_exponent,
-                                ),
-                            )
-                            pseudo_time_step = float(
-                                np.clip(
-                                    pseudo_time_step * growth,
-                                    controls.pseudo_time_minimum,
-                                    controls.pseudo_time_maximum,
-                                )
-                            )
-                        break
-                    factor *= 0.5
-                if accepted_line_search:
-                    break
-                if (
-                    not use_pseudo_transient
-                    or pseudo_time_step <= controls.pseudo_time_minimum
+                    parameter_column = (jacobian_residual - minus) / parameter_step
+                else:
+                    raise RuntimeError(
+                        "pseudo-arclength parameter-difference step exceeds bounds"
+                    )
+                parameter_column[mass_row] = 0.0
+                jacobian_evaluations += 1
+                chord_steps = 0
+                chord_steps_before = 0
+                force_jacobian_refresh = False
+
+            trace_jacobian_refreshed = refresh_jacobian
+
+            assert physical_jacobian is not None
+            assert parameter_column is not None
+            merit = 0.5 * (float(np.dot(residual, residual)) + arc_value**2)
+            old_linf = combined_linf
+            pseudo_time_before = pseudo_time_step
+            trace_pseudo_time_before = pseudo_time_before
+            parameter_before = parameter
+            linear_jacobian = physical_jacobian
+            if use_pseudo_transient:
+                current_problem = _make_problem(
+                    case_template.with_lid_velocity(
+                        parameter,
+                        suffix="arc-pseudo-time",
+                    )
+                )
+                pseudo_diagonal = pseudo_transient_diagonal(
+                    current_problem,
+                    transform,
+                    encoded,
+                )
+                linear_jacobian = (
+                    physical_jacobian
+                    + diags(pseudo_diagonal / pseudo_time_step, format="csc")
+                ).tocsc()
+            state_direction, parameter_direction, last_linear_solver = (
+                solve_bordered_newton_direction(
+                    linear_jacobian,
+                    parameter_column,
+                    arc_row,
+                    arc_parameter,
+                    residual,
+                    arc_value,
+                )
+            )
+
+            factor = 1.0
+            accepted_line_search = False
+            trial_merit = merit
+            trial_arc = arc_value
+            while factor >= controls.minimum_line_search_factor:
+                trial_parameter = parameter + factor * parameter_direction
+                if not (
+                    controls.parameter_minimum
+                    <= trial_parameter
+                    <= controls.parameter_maximum
                 ):
+                    factor *= 0.5
+                    continue
+                trial_encoded = np.clip(
+                    encoded + factor * state_direction,
+                    lower,
+                    upper,
+                )
+                trial_residual = counted(trial_encoded, trial_parameter)
+                trial_arc, _, _ = arclength_constraint(
+                    trial_encoded,
+                    trial_parameter,
+                    predicted_encoded,
+                    predicted_parameter,
+                    tangent,
+                    metric,
+                    scale=step_length,
+                )
+                trial_merit = 0.5 * (
+                    float(np.dot(trial_residual, trial_residual)) + trial_arc**2
+                )
+                sufficient_decrease = (
+                    trial_merit < merit
+                    if use_pseudo_transient
+                    else trial_merit < merit * (1.0 - 1.0e-4 * factor)
+                )
+                if np.isfinite(trial_merit) and sufficient_decrease:
+                    encoded = trial_encoded
+                    parameter = float(trial_parameter)
+                    residual = trial_residual
+                    final_arc_residual = trial_arc
+                    accepted_line_search = True
+                    chord_steps += 1
+                    if use_pseudo_transient:
+                        pseudo_transient_steps += 1
+                        new_linf = max(
+                            float(np.max(np.abs(residual), initial=0.0)),
+                            abs(trial_arc),
+                        )
+                        ser_ratio = old_linf / max(
+                            new_linf,
+                            np.finfo(float).tiny,
+                        )
+                        growth = min(
+                            controls.pseudo_time_growth_limit,
+                            max(
+                                0.25,
+                                ser_ratio ** controls.pseudo_time_ser_exponent,
+                            ),
+                        )
+                        pseudo_time_step = float(
+                            np.clip(
+                                pseudo_time_step * growth,
+                                controls.pseudo_time_minimum,
+                                controls.pseudo_time_maximum,
+                            )
+                        )
+                    if (
+                        (not use_pseudo_transient and trial_merit > 0.25 * merit)
+                        or (use_pseudo_transient and trial_merit > 0.95 * merit)
+                    ):
+                        force_jacobian_refresh = True
                     break
+                factor *= 0.5
+
+            if accepted_line_search:
+                append_trace(
+                    iteration=iteration,
+                    parameter_before=parameter_before,
+                    scaled_before=scaled_linf,
+                    arc_before=arc_value,
+                    jacobian_refreshed=refresh_jacobian,
+                    chord_before=chord_steps_before,
+                    use_pseudo_transient=use_pseudo_transient,
+                    pseudo_time_before=pseudo_time_before,
+                    line_search_factor=factor,
+                    accepted_step=True,
+                    merit_ratio=trial_merit / max(merit, np.finfo(float).tiny),
+                    outcome=(
+                        "accepted_refresh_requested"
+                        if force_jacobian_refresh
+                        else "accepted_chord_step"
+                    ),
+                )
+                continue
+
+            retry_with_smaller_pseudo_time = bool(
+                use_pseudo_transient
+                and pseudo_time_step > controls.pseudo_time_minimum
+            )
+            retry_with_refresh = chord_steps > 0
+            outcome = "line_search_failed"
+            if retry_with_smaller_pseudo_time:
                 pseudo_time_step = max(
                     controls.pseudo_time_minimum,
                     0.25 * pseudo_time_step,
                 )
-            if not accepted_line_search:
-                message = (
-                    "pseudo-arclength SER-PTC/Newton line search failed after "
-                    f"{last_linear_solver}"
-                )
-                break
+                outcome = "pseudo_time_reduced"
+            elif retry_with_refresh:
+                force_jacobian_refresh = True
+                chord_steps = 0
+                outcome = "jacobian_refresh_requested"
+            append_trace(
+                iteration=iteration,
+                parameter_before=parameter_before,
+                scaled_before=scaled_linf,
+                arc_before=arc_value,
+                jacobian_refreshed=refresh_jacobian,
+                chord_before=chord_steps_before,
+                use_pseudo_transient=use_pseudo_transient,
+                pseudo_time_before=pseudo_time_before,
+                line_search_factor=None,
+                accepted_step=False,
+                merit_ratio=1.0,
+                outcome=outcome,
+            )
+            if retry_with_smaller_pseudo_time or retry_with_refresh:
+                continue
+            message = (
+                "pseudo-arclength SER-PTC/Newton line search failed on a fresh "
+                f"Jacobian after {last_linear_solver}"
+            )
+            break
         else:
             message = (
-                "pseudo-arclength Jacobian-evaluation limit reached "
-                f"({controls.maximum_jacobians})"
+                "pseudo-arclength nonlinear-iteration limit reached "
+                f"({controls.maximum_iterations})"
             )
     except RuntimeError as error:
         message = str(error)
+        if len(iteration_trace) < iterations:
+            append_trace(
+                iteration=iterations,
+                parameter_before=trace_parameter_before,
+                scaled_before=trace_scaled_before,
+                arc_before=trace_arc_before,
+                jacobian_refreshed=trace_jacobian_refreshed,
+                chord_before=trace_chord_before,
+                use_pseudo_transient=trace_use_pseudo_transient,
+                pseudo_time_before=trace_pseudo_time_before,
+                line_search_factor=None,
+                accepted_step=False,
+                merit_ratio=1.0,
+                outcome="runtime_limit_or_failure",
+            )
 
     state = transform.decode(encoded)
     final_case = case_template.with_lid_velocity(parameter, suffix="arc-final")
@@ -598,6 +834,7 @@ def solve_r26_pseudo_arclength_step(
         linear_solver=last_linear_solver,
         pseudo_transient_steps=pseudo_transient_steps,
         final_pseudo_time_step=float(pseudo_time_step),
+        iteration_trace=tuple(iteration_trace),
     )
 
 

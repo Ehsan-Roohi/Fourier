@@ -32,6 +32,12 @@ N30_ARCLENGTH_SUBMIT = (
 N30_ARCLENGTH_VALIDATOR = (
     R26_ROOT / "tools" / "validate_r26_arclength_rescue.py"
 )
+N30_ARCLENGTH_RESUME_SLURM = (
+    R26_ROOT / "hpc" / "r26_kn020_n30_arclength_chord_resume.slurm"
+)
+N30_ARCLENGTH_RESUME_SUBMIT = (
+    R26_ROOT / "hpc" / "submit_r26_kn020_n30_arclength_chord_resume.sh"
+)
 sys.path.insert(0, str(CODE))
 
 from r26_cases import (  # noqa: E402
@@ -98,7 +104,11 @@ class MaxwellContract(unittest.TestCase):
         self.assertTrue(N30_SUBMIT.is_file())
         self.assertEqual(
             set((R26_ROOT / "hpc").glob("*n30*.slurm")),
-            {N30_PRODUCTION_SLURM, N30_ARCLENGTH_SLURM},
+            {
+                N30_PRODUCTION_SLURM,
+                N30_ARCLENGTH_SLURM,
+                N30_ARCLENGTH_RESUME_SLURM,
+            },
         )
 
     def test_n30_arclength_rescue_is_bounded_source_locked_and_fail_closed(self) -> None:
@@ -123,6 +133,33 @@ class MaxwellContract(unittest.TestCase):
         self.assertNotIn("R26_N28_DIR", script)
         self.assertTrue(N30_ARCLENGTH_SUBMIT.is_file())
 
+    def test_n30_arclength_chord_resume_reuses_only_the_accepted_root(self) -> None:
+        script = N30_ARCLENGTH_RESUME_SLURM.read_text()
+        self.assertIn(
+            'EXPECTED_PRODUCTION_REF="312ee29799e5fdb4340d1146af5c408d72563d49"',
+            script,
+        )
+        self.assertIn(
+            'EXPECTED_FAILED_ARC_REF="380a5cb05f0620813c255a086ca899b4051ea2ae"',
+            script,
+        )
+        self.assertIn("R26_ARC_FAILED_DIR", script)
+        self.assertIn("arc_attempt_003_lid_0.370215710658.npz", script)
+        self.assertIn("--failed-arclength-dir", script)
+        self.assertIn("--maximum-iterations 80", script)
+        self.assertIn("--maximum-jacobians 7", script)
+        self.assertIn("--maximum-objective-evaluations 6000", script)
+        self.assertIn("--pseudo-transient-chord-limit 12", script)
+        self.assertIn("--newton-chord-limit 3", script)
+        self.assertIn("--expected-failed-arclength-source-commit", script)
+        self.assertIn("N30_ARCLENGTH_CHORD_RESUME_PASSED.json", script)
+        self.assertIn("N30_ARCLENGTH_CHORD_RESUME_FAILED.json", script)
+        self.assertIn("_RESULTS.zip", script)
+        self.assertNotIn("--initial-step-factor", script)
+        self.assertNotIn("--minimum-step-factor", script)
+        self.assertNotIn("--nodes 32", script)
+        self.assertTrue(N30_ARCLENGTH_RESUME_SUBMIT.is_file())
+
     def test_arclength_validator_is_standalone_and_fail_closed(self) -> None:
         environment = dict(__import__("os").environ)
         environment.pop("PYTHONPATH", None)
@@ -135,6 +172,7 @@ class MaxwellContract(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertIn("--expected-target-lid", result.stdout)
+        self.assertIn("--expected-failed-arclength-source-commit", result.stdout)
 
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run(

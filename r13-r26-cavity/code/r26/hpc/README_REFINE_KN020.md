@@ -86,3 +86,32 @@ or their final acceptance criteria.  If the target is not bracketed within the
 bounded budget, or the final fixed-lid correction fails, the job packages a
 diagnostic failure and makes no N30 claim.  N32 remains unauthorized until
 this N30 target gate passes.
+
+## Evidence-based chord-reuse resume
+
+The first arclength job at commit
+`380a5cb05f0620813c255a086ca899b4051ea2ae` accepted a new raw-gated N30 root
+at `lid=0.37021571065841696` (`raw=3.7241093542306203e-9`).  Density,
+temperature, and wall pressure remained positive, there were no invalid
+evaluations, and the arclength constraint was satisfied to roundoff.  The
+failure therefore did not establish a physical singularity or a failed
+bordered formulation.
+
+The diagnostic records instead exposed a work-accounting error: the
+corrector's loop was bounded by `maximum_jacobians`, so seven permitted
+Jacobian builds also meant only seven nonlinear updates.  The audited
+fixed-parameter SER-PTC solver already reuses a colored Jacobian for controlled
+chord steps.  The corrected arclength implementation now uses the same
+separation: at most 80 nonlinear updates, seven Jacobian builds, twelve PTC
+chord updates per build, three Newton chord updates per build, and 6000 total
+objective evaluations per attempt.  Every nonlinear update is recorded in an
+iteration trace.
+
+`r26_kn020_n30_arclength_chord_resume.slurm` is source-locked to both failed
+archives.  It independently revalidates the accepted `0.37021571065841696`
+root, resumes from it, retains the previous absolute minimum arclength step
+`0.010751760973081607`, and caps the new maximum step at the previously
+accepted `0.021503521946163215`.  It neither restarts the earlier ladder nor
+authorizes N32.  A successful arclength bracket still must pass one ordinary
+fixed-lid correction and the unchanged raw Maxwell validator at exactly
+100 m/s.
