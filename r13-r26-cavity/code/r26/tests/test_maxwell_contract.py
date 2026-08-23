@@ -38,6 +38,12 @@ N30_ARCLENGTH_RESUME_SLURM = (
 N30_ARCLENGTH_RESUME_SUBMIT = (
     R26_ROOT / "hpc" / "submit_r26_kn020_n30_arclength_chord_resume.sh"
 )
+BALANCED_METRIC_GATE_SLURM = (
+    R26_ROOT / "hpc" / "r26_kn020_balanced_metric_gate_n8_n16.slurm"
+)
+BALANCED_METRIC_GATE_SUBMIT = (
+    R26_ROOT / "hpc" / "submit_r26_kn020_balanced_metric_gate_n8_n16.sh"
+)
 sys.path.insert(0, str(CODE))
 
 from r26_cases import (  # noqa: E402
@@ -62,6 +68,25 @@ def sha256(path: Path) -> str:
 
 
 class MaxwellContract(unittest.TestCase):
+    def test_balanced_arclength_metric_gate_is_n8_n16_only(self) -> None:
+        script = BALANCED_METRIC_GATE_SLURM.read_text()
+        submit = BALANCED_METRIC_GATE_SUBMIT.read_text()
+        self.assertIn(
+            'EXPECTED_GATE_REF="8cbd874eea68dd475faa3f5e3fb318b49cc0c665"',
+            script,
+        )
+        self.assertIn("validate_r26_globalization_gate.py", script)
+        self.assertIn("run_r26_balanced_metric_gate.py", script)
+        self.assertIn("--parameter-metric-fraction 0.5", script)
+        self.assertIn("BALANCED_METRIC_GATE_PASSED.json", script)
+        self.assertIn('"n30_authorized": False', script)
+        self.assertNotIn("--nodes 30", script)
+        self.assertNotIn("run_r26_pseudo_arclength_rescue.py", script)
+        self.assertNotIn("N30_PRODUCTION_PASSED", script)
+        self.assertIn("r26_kn020_balanced_metric_gate_n8_n16.slurm", submit)
+        self.assertTrue(BALANCED_METRIC_GATE_SLURM.is_file())
+        self.assertTrue(BALANCED_METRIC_GATE_SUBMIT.is_file())
+
     def test_n8_n16_globalization_gate_remains_source_locked(self) -> None:
         script = N8_N16_GATE_SLURM.read_text()
         self.assertIn("run_gate 8", script)

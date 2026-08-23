@@ -115,3 +115,32 @@ accepted `0.021503521946163215`.  It neither restarts the earlier ladder nor
 authorizes N32.  A successful arclength bracket still must pass one ordinary
 fixed-lid correction and the unchanged raw Maxwell validator at exactly
 100 m/s.
+
+## Balanced-metric correction after the chord-resume diagnostic
+
+The chord-resume job at commit
+`d494980776d3ef204158782a4176336566d06969` proved that Jacobian chord reuse
+was active (16--17 nonlinear iterations for seven Jacobian builds), but it
+accepted no new point.  Its full trace exposed the actual defect: with
+`parameter_scale=0.04`, the last accepted N30 secant assigned
+`0.9999648576` of the squared arclength norm to lid speed and only
+`0.0000351424` to all 15,300 encoded state unknowns.  The bordered hyperplane
+therefore constrained lid speed almost exactly and the supposed
+pseudo-arclength corrector was numerically equivalent to fixed-lid
+continuation.  The roundoff-level arclength residual was not evidence that a
+fold had been traversed.
+
+The corrected implementation computes the parameter scale from two accepted
+roots so that the mesh-independent RMS state increment and the lid increment
+each contribute one half of the squared secant norm.  A requested metric
+outside the fail-closed `[0.1, 0.9]` parameter-fraction interval is rejected.
+Absolute step lengths from the old metric are never reused after rebalancing;
+the step schedule is rebuilt from the accepted secant in the new metric.
+
+This change is deliberately gated before another N30 attempt.
+`r26_kn020_balanced_metric_gate_n8_n16.slurm` independently validates the
+immutable historical N8/N16 SER-PTC gate, replays the final known branch
+segment on both grids with the balanced bordered corrector, and independently
+checks the raw physical residual.  Its pass record explicitly leaves
+`n30_authorized` false.  No further N30 rescue should be prepared until this
+new N16 metric gate passes.

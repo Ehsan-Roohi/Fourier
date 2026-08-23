@@ -19,8 +19,10 @@ import scipy
 from r26_arclength import (
     ArcLengthCorrectorOptions,
     ArcLengthMetric,
+    balanced_parameter_scale,
     interpolate_bracketed_state,
     normalized_secant_tangent,
+    secant_metric_diagnostics,
     solve_r26_pseudo_arclength_step,
 )
 from r26_cases import jfm_maxwell_cavity_case
@@ -260,7 +262,8 @@ def main() -> None:
     )
     parser.add_argument("--raw-tolerance", type=float, default=1.0e-8)
     parser.add_argument("--residual-tolerance", type=float, default=1.0e-9)
-    parser.add_argument("--parameter-scale", type=float, default=0.04)
+    parser.add_argument("--parameter-scale", type=float)
+    parser.add_argument("--parameter-metric-fraction", type=float, default=0.5)
     parser.add_argument("--initial-step-factor", type=float, default=1.0)
     parser.add_argument("--minimum-step-factor", type=float, default=0.125)
     parser.add_argument("--maximum-step-factor", type=float, default=2.0)
@@ -288,6 +291,10 @@ def main() -> None:
     require(len(args.expected_failed_source_commit) == 40, "failed commit SHA has wrong length")
     require(args.maximum_attempts >= 1, "maximum attempts must be positive")
     require(args.maximum_iterations >= 1, "maximum iterations must be positive")
+    require(
+        0.1 <= args.parameter_metric_fraction <= 0.9,
+        "parameter metric fraction must lie within [0.1, 0.9]",
+    )
     require(
         args.pseudo_transient_chord_limit >= 1 and args.newton_chord_limit >= 1,
         "chord limits must be positive",
@@ -448,10 +455,36 @@ def main() -> None:
     require(current_parameter > previous_parameter, "last accepted seed pair is not advancing")
     require(current_parameter < args.target_lid, "failed run already reached the target")
 
-    metric = ArcLengthMetric(30 * 30 * 17, parameter_scale=args.parameter_scale)
     transform = LogStateTransform((30, 30, 17))
     previous_encoded = transform.encode(previous_state)
     current_encoded = transform.encode(current_state)
+    selected_parameter_scale = (
+        balanced_parameter_scale(
+            previous_encoded,
+            previous_parameter,
+            current_encoded,
+            current_parameter,
+            parameter_fraction=args.parameter_metric_fraction,
+        )
+        if args.parameter_scale is None
+        else float(args.parameter_scale)
+    )
+    metric = ArcLengthMetric(
+        30 * 30 * 17,
+        parameter_scale=selected_parameter_scale,
+    )
+    metric_diagnostics = secant_metric_diagnostics(
+        previous_encoded,
+        previous_parameter,
+        current_encoded,
+        current_parameter,
+        metric,
+    )
+    require(
+        0.1 <= metric_diagnostics.parameter_fraction <= 0.9,
+        "declared pseudo-arclength metric degenerates toward fixed-state or "
+        "fixed-parameter continuation",
+    )
     reference_tangent = normalized_secant_tangent(
         previous_encoded,
         previous_parameter,
@@ -460,19 +493,16 @@ def main() -> None:
         metric,
     )
     initial_secant_length = reference_tangent.secant_length
-    if resume_provenance is None:
-        step_length = args.initial_step_factor * initial_secant_length
-        minimum_step = args.minimum_step_factor * initial_secant_length
-        maximum_step = args.maximum_step_factor * initial_secant_length
-    else:
-        step_length = float(resume_provenance["prior_accepted_step"])
-        minimum_step = float(resume_provenance["prior_minimum_step"])
-        maximum_step = step_length
+    # Absolute step lengths from an older metric cannot be reused after
+    # rebalancing. Rebuild the bounded schedule from this accepted secant.
+    step_length = args.initial_step_factor * initial_secant_length
+    minimum_step = args.minimum_step_factor * initial_secant_length
+    maximum_step = args.maximum_step_factor * initial_secant_length
     declared_initial_step = step_length
     controls = ArcLengthCorrectorOptions(
         residual_tolerance=args.residual_tolerance,
         raw_tolerance=args.raw_tolerance,
-        parameter_scale=args.parameter_scale,
+        parameter_scale=selected_parameter_scale,
         maximum_iterations=args.maximum_iterations,
         maximum_jacobians=args.maximum_jacobians,
         maximum_objective_evaluations=args.maximum_objective_evaluations,
@@ -521,6 +551,8 @@ def main() -> None:
                 "iteration_trace": result.iteration_trace,
             },
             "tangent_parameter_component": result.tangent.parameter,
+            "state_metric_fraction": result.state_metric_fraction,
+            "parameter_metric_fraction": result.parameter_metric_fraction,
             "diagnostics": asdict(result.diagnostics),
             "global_balances": result.global_balances,
             "state_sha256": state_sha256(result.state),
@@ -638,7 +670,15 @@ def main() -> None:
         },
         "failed_arclength_provenance": resume_provenance,
         "arclength_controls": {
-            "parameter_scale": args.parameter_scale,
+            "parameter_scale": selected_parameter_scale,
+            "parameter_scale_mode": (
+                "secant_balanced" if args.parameter_scale is None else "explicit"
+            ),
+            "requested_parameter_metric_fraction": args.parameter_metric_fraction,
+            "initial_state_metric_fraction": metric_diagnostics.state_fraction,
+            "initial_parameter_metric_fraction": metric_diagnostics.parameter_fraction,
+            "initial_state_rms": metric_diagnostics.state_rms,
+            "initial_parameter_increment": metric_diagnostics.parameter_increment,
             "initial_secant_length": initial_secant_length,
             "initial_step": declared_initial_step,
             "minimum_step": minimum_step,

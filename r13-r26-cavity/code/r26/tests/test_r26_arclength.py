@@ -10,8 +10,10 @@ from r26_arclength import (
     ArcLengthCorrectorOptions,
     ArcLengthMetric,
     arclength_constraint,
+    balanced_parameter_scale,
     interpolate_bracketed_state,
     normalized_secant_tangent,
+    secant_metric_diagnostics,
     solve_bordered_newton_direction,
 )
 from r26_cases import jfm_maxwell_cavity_case
@@ -71,6 +73,50 @@ def test_arclength_hyperplane_is_exact_at_predictor() -> None:
     assert value == 0.0
     np.testing.assert_allclose(row, metric.state_weight * tangent.state / 0.5)
     assert parameter_entry == metric.parameter_weight * tangent.parameter / 0.5
+
+
+def test_secant_balanced_metric_assigns_requested_squared_norm_fraction() -> None:
+    previous = np.asarray((0.0, 0.0, 0.0, 0.0))
+    current = np.asarray((0.002, -0.001, 0.003, -0.002))
+    previous_parameter = 0.36935558170895255
+    current_parameter = 0.37021571065841696
+    scale = balanced_parameter_scale(
+        previous,
+        previous_parameter,
+        current,
+        current_parameter,
+        parameter_fraction=0.5,
+    )
+    diagnostic = secant_metric_diagnostics(
+        previous,
+        previous_parameter,
+        current,
+        current_parameter,
+        ArcLengthMetric(previous.size, parameter_scale=scale),
+    )
+    np.testing.assert_allclose(
+        (diagnostic.state_fraction, diagnostic.parameter_fraction),
+        (0.5, 0.5),
+        rtol=0.0,
+        atol=2.0e-15,
+    )
+
+
+def test_historical_small_parameter_scale_exposes_fixed_parameter_degeneracy() -> None:
+    # This ratio reproduces the N30 diagnostic: encoded-state RMS 1.275e-4
+    # for a lid increment 8.60129e-4.  parameter_scale=0.04 assigns more
+    # than 99.99% of the squared arclength norm to the lid parameter.
+    previous = np.zeros(4)
+    current = np.full(4, 1.275e-4)
+    diagnostic = secant_metric_diagnostics(
+        previous,
+        0.36935558170895255,
+        current,
+        0.37021571065841696,
+        ArcLengthMetric(previous.size, parameter_scale=0.04),
+    )
+    assert diagnostic.parameter_fraction > 0.9999
+    assert diagnostic.state_fraction < 1.0e-4
 
 
 def test_bordered_system_remains_invertible_at_a_simple_fold() -> None:
@@ -134,3 +180,12 @@ def test_arclength_controls_are_bounded_and_fail_closed() -> None:
         assert "work limits" in str(error)
     else:
         raise AssertionError("zero nonlinear-iteration limit was accepted")
+    try:
+        ArcLengthCorrectorOptions(
+            minimum_parameter_metric_fraction=0.95,
+            maximum_parameter_metric_fraction=0.9,
+        )
+    except ValueError as error:
+        assert "metric-fraction bounds" in str(error)
+    else:
+        raise AssertionError("invalid metric-fraction bounds were accepted")

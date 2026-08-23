@@ -91,6 +91,88 @@ class ArcLengthTangent:
     secant_length: float
 
 
+@dataclass(frozen=True)
+class ArcLengthMetricDiagnostics:
+    """Relative state/parameter contributions for one physical secant."""
+
+    state_rms: float
+    parameter_increment: float
+    parameter_scale: float
+    state_fraction: float
+    parameter_fraction: float
+
+
+def balanced_parameter_scale(
+    previous_state: np.ndarray,
+    previous_parameter: float,
+    current_state: np.ndarray,
+    current_parameter: float,
+    *,
+    parameter_fraction: float = 0.5,
+) -> float:
+    """Scale the parameter against the mesh-independent RMS state secant.
+
+    ``parameter_fraction`` is the requested fraction of the *squared* secant
+    norm assigned to the continuation parameter.  The remaining fraction is
+    assigned to the encoded-state RMS increment.  Computing the scale from
+    two accepted roots prevents pseudo-arclength from silently degenerating
+    into fixed-parameter continuation.
+    """
+
+    previous = np.asarray(previous_state, dtype=float)
+    current = np.asarray(current_state, dtype=float)
+    if previous.shape != current.shape or previous.ndim != 1 or previous.size < 1:
+        raise ValueError("balanced metric states must be equal nonempty vectors")
+    if not np.isfinite(previous).all() or not np.isfinite(current).all():
+        raise ValueError("balanced metric states must be finite")
+    values = (previous_parameter, current_parameter, parameter_fraction)
+    if not all(np.isfinite(value) for value in values):
+        raise ValueError("balanced metric parameters must be finite")
+    if not 0.0 < parameter_fraction < 1.0:
+        raise ValueError("parameter metric fraction must lie strictly between zero and one")
+    state_rms = float(np.sqrt(np.mean((current - previous) ** 2)))
+    parameter_increment = abs(float(current_parameter - previous_parameter))
+    if state_rms <= np.finfo(float).eps:
+        raise ValueError("accepted state secant is too small to balance the metric")
+    if parameter_increment <= np.finfo(float).eps:
+        raise ValueError("accepted parameter secant is too small to balance the metric")
+    scale = parameter_increment / state_rms * np.sqrt(
+        (1.0 - parameter_fraction) / parameter_fraction
+    )
+    if not np.isfinite(scale) or scale <= 0.0:
+        raise FloatingPointError("balanced parameter scale is not positive and finite")
+    return float(scale)
+
+
+def secant_metric_diagnostics(
+    previous_state: np.ndarray,
+    previous_parameter: float,
+    current_state: np.ndarray,
+    current_parameter: float,
+    metric: ArcLengthMetric,
+) -> ArcLengthMetricDiagnostics:
+    """Report how the declared metric partitions one accepted secant."""
+
+    previous = np.asarray(previous_state, dtype=float)
+    current = np.asarray(current_state, dtype=float)
+    if previous.shape != (metric.state_size,) or current.shape != previous.shape:
+        raise ValueError("metric diagnostic states have the wrong shape")
+    delta = current - previous
+    parameter_increment = float(current_parameter - previous_parameter)
+    state_squared = metric.state_weight * float(np.dot(delta, delta))
+    parameter_squared = metric.parameter_weight * parameter_increment**2
+    total = state_squared + parameter_squared
+    if not np.isfinite(total) or total <= 0.0:
+        raise ValueError("metric diagnostic secant must be finite and nonzero")
+    return ArcLengthMetricDiagnostics(
+        state_rms=float(np.sqrt(state_squared)),
+        parameter_increment=parameter_increment,
+        parameter_scale=float(metric.parameter_scale),
+        state_fraction=float(state_squared / total),
+        parameter_fraction=float(parameter_squared / total),
+    )
+
+
 def normalized_secant_tangent(
     previous_state: np.ndarray,
     previous_parameter: float,
@@ -229,6 +311,8 @@ class ArcLengthCorrectorOptions:
     pseudo_time_ser_exponent: float = 1.0
     pseudo_time_growth_limit: float = 2.0
     newton_switch_tolerance: float = 1.0e-6
+    minimum_parameter_metric_fraction: float = 0.1
+    maximum_parameter_metric_fraction: float = 0.9
 
     def __post_init__(self) -> None:
         positive = (
@@ -245,6 +329,8 @@ class ArcLengthCorrectorOptions:
             self.pseudo_time_ser_exponent,
             self.pseudo_time_growth_limit,
             self.newton_switch_tolerance,
+            self.minimum_parameter_metric_fraction,
+            self.maximum_parameter_metric_fraction,
         )
         if not all(np.isfinite(value) and value > 0.0 for value in positive):
             raise ValueError("arclength tolerances and scales must be finite and positive")
@@ -271,6 +357,11 @@ class ArcLengthCorrectorOptions:
             raise ValueError("pseudo-time limits must contain the initial step")
         if self.pseudo_time_growth_limit < 1.0:
             raise ValueError("pseudo-time growth limit must be at least one")
+        if not (
+            0.0 < self.minimum_parameter_metric_fraction
+            < self.maximum_parameter_metric_fraction < 1.0
+        ):
+            raise ValueError("parameter metric-fraction bounds must lie inside (0, 1)")
 
 
 @dataclass(frozen=True)
@@ -295,6 +386,8 @@ class ArcLengthCorrectorResult:
     pseudo_transient_steps: int
     final_pseudo_time_step: float
     iteration_trace: tuple[dict[str, object], ...]
+    state_metric_fraction: float
+    parameter_metric_fraction: float
 
 
 def _make_problem(case: CavityCase) -> R26NodeBVP:
@@ -339,6 +432,24 @@ def solve_r26_pseudo_arclength_step(
         metric,
         reference=reference_tangent,
     )
+    metric_diagnostics = secant_metric_diagnostics(
+        previous_encoded,
+        previous_parameter,
+        current_encoded,
+        current_parameter,
+        metric,
+    )
+    if not (
+        controls.minimum_parameter_metric_fraction
+        <= metric_diagnostics.parameter_fraction
+        <= controls.maximum_parameter_metric_fraction
+    ):
+        raise ValueError(
+            "pseudo-arclength metric is unbalanced: parameter squared-norm "
+            f"fraction={metric_diagnostics.parameter_fraction:.9g}, expected within "
+            f"[{controls.minimum_parameter_metric_fraction:.9g}, "
+            f"{controls.maximum_parameter_metric_fraction:.9g}]"
+        )
     predicted_encoded = current_encoded + step_length * tangent.state
     predicted_parameter = current_parameter + step_length * tangent.parameter
     lower, upper = transform.least_squares_bounds()
@@ -835,6 +946,8 @@ def solve_r26_pseudo_arclength_step(
         pseudo_transient_steps=pseudo_transient_steps,
         final_pseudo_time_step=float(pseudo_time_step),
         iteration_trace=tuple(iteration_trace),
+        state_metric_fraction=metric_diagnostics.state_fraction,
+        parameter_metric_fraction=metric_diagnostics.parameter_fraction,
     )
 
 
@@ -874,10 +987,13 @@ __all__ = [
     "ArcLengthCorrectorOptions",
     "ArcLengthCorrectorResult",
     "ArcLengthMetric",
+    "ArcLengthMetricDiagnostics",
     "ArcLengthTangent",
     "arclength_constraint",
+    "balanced_parameter_scale",
     "interpolate_bracketed_state",
     "normalized_secant_tangent",
+    "secant_metric_diagnostics",
     "solve_bordered_newton_direction",
     "solve_r26_pseudo_arclength_step",
 ]
