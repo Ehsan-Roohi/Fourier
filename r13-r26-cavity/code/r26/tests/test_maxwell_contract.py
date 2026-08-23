@@ -52,6 +52,7 @@ from r26_cases import (  # noqa: E402
     ViscosityKind,
     jfm_maxwell_cavity_case,
 )
+from analysis.run_r26_balanced_metric_gate import jsonable as metric_gate_jsonable  # noqa: E402
 from r26_tensor_closures import closure_coefficients  # noqa: E402
 from r26_wall_conditions import WallParameters  # noqa: E402
 
@@ -68,6 +69,15 @@ def sha256(path: Path) -> str:
 
 
 class MaxwellContract(unittest.TestCase):
+    def test_balanced_metric_gate_preserves_boolean_json_types(self) -> None:
+        # ``bool`` subclasses ``int`` in Python, so this is an ordering-sensitive
+        # regression test for the fail-closed n30_authorized contract.
+        self.assertIs(metric_gate_jsonable(False), False)
+        self.assertIs(metric_gate_jsonable(True), True)
+        self.assertIs(metric_gate_jsonable(np.bool_(False)), False)
+        self.assertEqual(metric_gate_jsonable(0), 0)
+        self.assertIs(type(metric_gate_jsonable(0)), int)
+
     def test_balanced_arclength_metric_gate_is_n8_n16_only(self) -> None:
         script = BALANCED_METRIC_GATE_SLURM.read_text()
         submit = BALANCED_METRIC_GATE_SUBMIT.read_text()
