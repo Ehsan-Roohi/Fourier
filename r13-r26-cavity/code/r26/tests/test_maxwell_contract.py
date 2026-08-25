@@ -163,6 +163,7 @@ class MaxwellContract(unittest.TestCase):
         self.assertNotIn("--nodes 32", script)
         self.assertIn("r26_kn020_n30_fold_continuation_resume.slurm", submit)
         self.assertIn("controls.enforce_parameter_metric_fraction_bounds", arclength_source)
+        self.assertNotIn("last accepted seed pair has zero parameter increment", arclength_source)
         self.assertTrue(N30_FOLD_RESUME_SLURM.is_file())
         self.assertTrue(N30_FOLD_RESUME_SUBMIT.is_file())
 

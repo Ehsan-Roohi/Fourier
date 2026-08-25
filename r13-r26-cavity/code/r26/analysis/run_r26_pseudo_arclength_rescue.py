@@ -562,10 +562,6 @@ def main() -> None:
             "current_accepted_seed": current_provenance,
         }
 
-    require(
-        abs(current_parameter - previous_parameter) > np.finfo(float).eps,
-        "last accepted seed pair has zero parameter increment",
-    )
     require(current_parameter < args.target_lid, "failed run already reached the target")
 
     transform = LogStateTransform((30, 30, 17))

@@ -127,15 +127,15 @@ def test_fixed_calibrated_metric_allows_parameter_tangent_to_vanish_at_fold() ->
         previous,
         0.3703661695101804,
         current,
-        0.37038324507064474,
+        0.3703661695101804,
         metric,
     )
-    assert diagnostic.parameter_fraction < 1.0e-6
+    assert diagnostic.parameter_fraction == 0.0
     tangent = normalized_secant_tangent(
         previous,
         0.3703661695101804,
         current,
-        0.37038324507064474,
+        0.3703661695101804,
         metric,
     )
     np.testing.assert_allclose(
