@@ -53,6 +53,12 @@ N30_BALANCED_ARCLENGTH_SLURM = (
 N30_BALANCED_ARCLENGTH_SUBMIT = (
     R26_ROOT / "hpc" / "submit_r26_kn020_n30_balanced_arclength_rescue.sh"
 )
+N30_FOLD_RESUME_SLURM = (
+    R26_ROOT / "hpc" / "r26_kn020_n30_fold_continuation_resume.slurm"
+)
+N30_FOLD_RESUME_SUBMIT = (
+    R26_ROOT / "hpc" / "submit_r26_kn020_n30_fold_continuation_resume.sh"
+)
 sys.path.insert(0, str(CODE))
 
 from analysis.run_jfm_observability_continuation import jsonable as continuation_jsonable  # noqa: E402
@@ -132,6 +138,34 @@ class MaxwellContract(unittest.TestCase):
         self.assertTrue(N30_BALANCED_ARCLENGTH_SLURM.is_file())
         self.assertTrue(N30_BALANCED_ARCLENGTH_SUBMIT.is_file())
 
+    def test_n30_fold_resume_preserves_accepted_roots_and_fixed_metric(self) -> None:
+        script = N30_FOLD_RESUME_SLURM.read_text()
+        submit = N30_FOLD_RESUME_SUBMIT.read_text()
+        arclength_source = (R26_ROOT / "r26_arclength.py").read_text()
+        self.assertIn(
+            'EXPECTED_BALANCED_FAILURE_REF="7c69348b051d5515625a7746dd46b90ce5c06619"',
+            script,
+        )
+        self.assertIn("R26_BALANCED_FAILED_DIR", script)
+        self.assertIn("arc_attempt_003_lid_0.37036616951", script)
+        self.assertIn("arc_attempt_004_lid_0.370383245071", script)
+        self.assertIn("--resume-arclength-dir", script)
+        self.assertIn("--expected-resume-arclength-source-commit", script)
+        self.assertIn("--expected-continuation-resume-source-commit", script)
+        self.assertIn("--parameter-metric-fraction 0.5", script)
+        self.assertNotIn("--parameter-scale", script)
+        self.assertIn("--maximum-attempts 24", script)
+        self.assertIn("--maximum-jacobians 7", script)
+        self.assertIn("--maximum-objective-evaluations 6000", script)
+        self.assertIn("N30_FOLD_CONTINUATION_RESUME_PASSED.json", script)
+        self.assertIn("N30_FOLD_CONTINUATION_RESUME_FAILED.json", script)
+        self.assertIn('"n30_target_accepted": False', script)
+        self.assertNotIn("--nodes 32", script)
+        self.assertIn("r26_kn020_n30_fold_continuation_resume.slurm", submit)
+        self.assertIn("controls.enforce_parameter_metric_fraction_bounds", arclength_source)
+        self.assertTrue(N30_FOLD_RESUME_SLURM.is_file())
+        self.assertTrue(N30_FOLD_RESUME_SUBMIT.is_file())
+
     def test_balanced_arclength_metric_gate_is_n8_n16_only(self) -> None:
         script = BALANCED_METRIC_GATE_SLURM.read_text()
         submit = BALANCED_METRIC_GATE_SUBMIT.read_text()
@@ -198,6 +232,7 @@ class MaxwellContract(unittest.TestCase):
                 N30_ARCLENGTH_SLURM,
                 N30_ARCLENGTH_RESUME_SLURM,
                 N30_BALANCED_ARCLENGTH_SLURM,
+                N30_FOLD_RESUME_SLURM,
             },
         )
 

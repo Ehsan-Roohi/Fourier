@@ -119,6 +119,33 @@ def test_historical_small_parameter_scale_exposes_fixed_parameter_degeneracy() -
     assert diagnostic.state_fraction < 1.0e-4
 
 
+def test_fixed_calibrated_metric_allows_parameter_tangent_to_vanish_at_fold() -> None:
+    metric = ArcLengthMetric(4, parameter_scale=2.0)
+    previous = np.zeros(4)
+    current = np.asarray((0.02, -0.02, 0.02, -0.02))
+    diagnostic = secant_metric_diagnostics(
+        previous,
+        0.3703661695101804,
+        current,
+        0.37038324507064474,
+        metric,
+    )
+    assert diagnostic.parameter_fraction < 1.0e-6
+    tangent = normalized_secant_tangent(
+        previous,
+        0.3703661695101804,
+        current,
+        0.37038324507064474,
+        metric,
+    )
+    np.testing.assert_allclose(
+        metric.inner(tangent.state, tangent.parameter, tangent.state, tangent.parameter),
+        1.0,
+        rtol=0.0,
+        atol=2.0e-15,
+    )
+
+
 def test_bordered_system_remains_invertible_at_a_simple_fold() -> None:
     state_direction, parameter_direction, method = solve_bordered_newton_direction(
         csc_matrix([[0.0]]),
@@ -167,6 +194,7 @@ def test_arclength_controls_are_bounded_and_fail_closed() -> None:
     assert controls.maximum_objective_evaluations == 6000
     assert controls.pseudo_transient_chord_limit == 12
     assert controls.newton_chord_limit == 3
+    assert controls.enforce_parameter_metric_fraction_bounds is False
     assert controls.pseudo_time_minimum <= controls.pseudo_time_initial
     try:
         ArcLengthCorrectorOptions(pseudo_time_minimum=2.0)
@@ -189,3 +217,9 @@ def test_arclength_controls_are_bounded_and_fail_closed() -> None:
         assert "metric-fraction bounds" in str(error)
     else:
         raise AssertionError("invalid metric-fraction bounds were accepted")
+    try:
+        ArcLengthCorrectorOptions(enforce_parameter_metric_fraction_bounds=1)
+    except TypeError as error:
+        assert "must be boolean" in str(error)
+    else:
+        raise AssertionError("non-boolean metric-fraction enforcement was accepted")

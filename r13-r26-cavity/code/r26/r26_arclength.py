@@ -313,6 +313,7 @@ class ArcLengthCorrectorOptions:
     newton_switch_tolerance: float = 1.0e-6
     minimum_parameter_metric_fraction: float = 0.1
     maximum_parameter_metric_fraction: float = 0.9
+    enforce_parameter_metric_fraction_bounds: bool = False
 
     def __post_init__(self) -> None:
         positive = (
@@ -362,6 +363,8 @@ class ArcLengthCorrectorOptions:
             < self.maximum_parameter_metric_fraction < 1.0
         ):
             raise ValueError("parameter metric-fraction bounds must lie inside (0, 1)")
+        if not isinstance(self.enforce_parameter_metric_fraction_bounds, (bool, np.bool_)):
+            raise TypeError("metric-fraction enforcement flag must be boolean")
 
 
 @dataclass(frozen=True)
@@ -439,7 +442,14 @@ def solve_r26_pseudo_arclength_step(
         current_parameter,
         metric,
     )
-    if not (
+    # A fixed positive-definite metric is calibrated on a representative
+    # non-degenerate secant before continuation starts.  On a genuine fold,
+    # however, the parameter component of the branch tangent must approach
+    # zero.  Treating that physical rotation as a metric failure would make
+    # pseudo-arclength fail at exactly the point it is intended to cross.
+    # Bounds therefore remain available for explicit calibration tests, but
+    # are diagnostic-only during ordinary fold traversal.
+    if controls.enforce_parameter_metric_fraction_bounds and not (
         controls.minimum_parameter_metric_fraction
         <= metric_diagnostics.parameter_fraction
         <= controls.maximum_parameter_metric_fraction

@@ -1,0 +1,46 @@
+#!/bin/bash
+# Submit the source-locked N30 fold-continuation resume stage.
+
+set -euo pipefail
+
+: "${R26_BALANCED_GATE_DIR:?Set the passed N8/N16 balanced-metric gate}"
+: "${R26_N30_FAILED_DIR:?Set the failed fresh-N30 directory}"
+: "${R26_ARC_FAILED_DIR:?Set the first failed N30 arclength directory}"
+: "${R26_BALANCED_FAILED_DIR:?Set the failed balanced N30 directory}"
+: "${R26_FOLD_N30_REF:?Set the immutable 40-character source commit}"
+
+[[ "$R26_FOLD_N30_REF" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "R26_FOLD_N30_REF must be a lowercase 40-character Git commit SHA" >&2
+  exit 2
+}
+test -f "$R26_BALANCED_GATE_DIR/BALANCED_METRIC_GATE_PASSED.json"
+test -f "$R26_N30_FAILED_DIR/N30_PRODUCTION_FAILED.json"
+test -f "$R26_ARC_FAILED_DIR/N30_ARCLENGTH_RESCUE_FAILED.json"
+test -f "$R26_BALANCED_FAILED_DIR/N30_BALANCED_ARCLENGTH_RESCUE_FAILED.json"
+
+R26_FOLD_N30_OUT="${R26_FOLD_N30_OUT:-/project/pi_roohie_umass_edu/CavityColdToHotIdentify/R26_N30_FOLD_CONTINUATION_RESUME_$(date +%Y%m%d_%H%M%S)}"
+test ! -e "$R26_FOLD_N30_OUT"
+test ! -e "${R26_FOLD_N30_OUT}_RESULTS.zip"
+mkdir -p "$(dirname "$R26_FOLD_N30_OUT")"
+
+SCRIPT="$(mktemp "${TMPDIR:-/tmp}/r26-fold-n30.XXXXXX.slurm")"
+cleanup() { rm -f "$SCRIPT"; }
+trap cleanup EXIT
+
+RAW_URL="https://raw.githubusercontent.com/Ehsan-Roohi/Fourier/${R26_FOLD_N30_REF}/r13-r26-cavity/code/r26/hpc/r26_kn020_n30_fold_continuation_resume.slurm"
+curl -fsSL "$RAW_URL" -o "$SCRIPT"
+bash -n "$SCRIPT"
+
+SUBMIT_RESULT="$(sbatch \
+  --output="${R26_FOLD_N30_OUT}.slurm-%j.out" \
+  --error="${R26_FOLD_N30_OUT}.slurm-%j.err" \
+  --export=ALL,R26_BALANCED_GATE_DIR="$R26_BALANCED_GATE_DIR",R26_N30_FAILED_DIR="$R26_N30_FAILED_DIR",R26_ARC_FAILED_DIR="$R26_ARC_FAILED_DIR",R26_BALANCED_FAILED_DIR="$R26_BALANCED_FAILED_DIR",R26_FOLD_N30_OUT="$R26_FOLD_N30_OUT",R26_FOLD_N30_REF="$R26_FOLD_N30_REF" \
+  "$SCRIPT")"
+JOB_ID="${SUBMIT_RESULT##* }"
+
+echo "$SUBMIT_RESULT"
+echo "JOB_ID=$JOB_ID"
+echo "R26_OUTPUT=$R26_FOLD_N30_OUT"
+echo "R26_RESULTS_ZIP=${R26_FOLD_N30_OUT}_RESULTS.zip"
+echo "R26_RESULTS_SHA=${R26_FOLD_N30_OUT}_RESULTS.zip.sha256.txt"
+squeue -j "$JOB_ID" -o "%.18i %.14T %.12M %.12l %.30R"

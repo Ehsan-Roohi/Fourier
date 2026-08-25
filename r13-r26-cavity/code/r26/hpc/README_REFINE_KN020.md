@@ -163,3 +163,26 @@ the balanced metric.  Each attempt remains capped at seven Jacobian builds,
 80 nonlinear updates, and 6000 objective evaluations, with no more than 24
 attempts.  Success still requires a target bracket, exactly one fixed-lid
 correction at 100 m/s, and the unchanged independent Maxwell raw gate.
+
+## Fold-continuation resume after job 63549978
+
+Job `63549978` passed all 117 source tests and the independent N8/N16 metric
+gate.  It then accepted two additional N30 roots at lid parameters
+`0.3703661695101804` and `0.37038324507064474`, with raw gates
+`4.027990163635309e-10` and `2.0262469480059053e-10`.  The subsequent secant
+assigned only `0.00152901971` of its squared norm to lid speed, and the old
+runtime guard stopped before the next nonlinear solve.
+
+That small fraction is valid fold geometry, not a singular metric.  A
+positive-definite arclength metric must be calibrated on a non-degenerate
+secant and then held fixed while the parameter component of the tangent is
+allowed to pass through zero.  Rebalancing the metric at every step would
+instead suppress the very fold that pseudo-arclength is meant to traverse.
+
+`r26_kn020_n30_fold_continuation_resume.slurm` implements this correction.  It
+source-locks and independently revalidates the two accepted roots from job
+`63549978`, keeps the original 50/50 calibrated metric fixed, rebuilds the
+bounded step schedule from their physical secant, and preserves the existing
+24-attempt, seven-Jacobian, 80-update, and 6000-objective caps.  A target claim
+still requires target bracketing, one ordinary fixed-lid correction, and the
+unchanged independent Maxwell raw gate.  N32 remains unauthorized.

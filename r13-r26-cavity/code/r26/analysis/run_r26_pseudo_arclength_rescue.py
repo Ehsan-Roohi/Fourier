@@ -252,9 +252,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--failed-run-dir", type=Path, required=True)
     parser.add_argument("--failed-arclength-dir", type=Path)
+    parser.add_argument("--resume-arclength-dir", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--expected-failed-source-commit", required=True)
     parser.add_argument("--expected-failed-arclength-source-commit")
+    parser.add_argument("--expected-resume-arclength-source-commit")
     parser.add_argument(
         "--target-lid",
         type=float,
@@ -281,11 +283,26 @@ def main() -> None:
         == (args.expected_failed_arclength_source_commit is None),
         "failed arclength directory and expected commit must be supplied together",
     )
+    require(
+        (args.resume_arclength_dir is None)
+        == (args.expected_resume_arclength_source_commit is None),
+        "resume arclength directory and expected commit must be supplied together",
+    )
+    require(
+        args.resume_arclength_dir is None or args.failed_arclength_dir is not None,
+        "continuation resume requires the original failed-arclength metric seed",
+    )
     if args.failed_arclength_dir is not None:
         require(args.failed_arclength_dir.is_dir(), "failed arclength directory missing")
         require(
             len(args.expected_failed_arclength_source_commit) == 40,
             "failed arclength commit SHA has wrong length",
+        )
+    if args.resume_arclength_dir is not None:
+        require(args.resume_arclength_dir.is_dir(), "resume arclength directory missing")
+        require(
+            len(args.expected_resume_arclength_source_commit) == 40,
+            "resume arclength commit SHA has wrong length",
         )
     require(not args.output_dir.exists(), "arclength output directory already exists")
     require(len(args.expected_failed_source_commit) == 40, "failed commit SHA has wrong length")
@@ -452,18 +469,116 @@ def main() -> None:
             "prior_minimum_step": prior_minimum_step,
             "prior_accepted_step": prior_accepted_step,
         }
-    require(current_parameter > previous_parameter, "last accepted seed pair is not advancing")
+
+    # Freeze the metric calibrated from the original non-degenerate accepted
+    # secant.  A later near-fold secant is continuation geometry, not a reason
+    # to redefine the norm.
+    calibration_previous_state = previous_state
+    calibration_previous_parameter = previous_parameter
+    calibration_previous_provenance = previous_provenance
+    calibration_current_state = current_state
+    calibration_current_parameter = current_parameter
+    calibration_current_provenance = current_provenance
+    continuation_resume_provenance: dict[str, object] | None = None
+
+    if args.resume_arclength_dir is not None:
+        resume_record_path = (
+            args.resume_arclength_dir / "N30_BALANCED_ARCLENGTH_RESCUE_FAILED.json"
+        )
+        resume_source_path = args.resume_arclength_dir / "source_commit.txt"
+        resume_attempt_dir = args.resume_arclength_dir / "ARCLENGTH"
+        for path in (resume_record_path, resume_source_path, resume_attempt_dir):
+            require(path.exists(), f"required continuation-resume artifact missing: {path.name}")
+        resume_record = json.loads(resume_record_path.read_text(encoding="utf-8"))
+        resume_source = resume_source_path.read_text(encoding="utf-8").strip()
+        require(
+            resume_record.get("status") == "R26_N30_BALANCED_ARCLENGTH_RESCUE_FAILED",
+            "wrong continuation-resume status",
+        )
+        require(
+            resume_record.get("source_commit")
+            == args.expected_resume_arclength_source_commit,
+            "continuation-resume record source mismatch",
+        )
+        require(
+            resume_source == args.expected_resume_arclength_source_commit,
+            "continuation-resume source_commit.txt mismatch",
+        )
+        require(
+            resume_record.get("failed_production_commit")
+            == args.expected_failed_source_commit,
+            "continuation-resume production provenance mismatch",
+        )
+        require(
+            resume_record.get("failed_arclength_commit")
+            == args.expected_failed_arclength_source_commit,
+            "continuation-resume arclength provenance mismatch",
+        )
+        require(
+            resume_record.get("n30_target_accepted") is False,
+            "continuation-resume failure record changed target acceptance",
+        )
+        attempt_paths = sorted(resume_attempt_dir.glob("arc_attempt_*.json"))
+        require(bool(attempt_paths), "continuation-resume attempts are missing")
+        resume_attempts = [
+            json.loads(path.read_text(encoding="utf-8")) for path in attempt_paths
+        ]
+        resume_attempts.sort(key=lambda row: int(row["attempt"]))
+        require(
+            [int(row["attempt"]) for row in resume_attempts]
+            == list(range(1, len(resume_attempts) + 1)),
+            "continuation-resume attempt sequence is incomplete",
+        )
+        resume_accepted = [row for row in resume_attempts if bool(row.get("accepted"))]
+        require(
+            len(resume_accepted) >= 2,
+            "continuation-resume has fewer than two accepted roots",
+        )
+        previous_state, previous_parameter, previous_provenance = (
+            load_and_validate_arclength_seed(
+                resume_attempt_dir,
+                resume_accepted[-2],
+                template,
+                args.raw_tolerance,
+            )
+        )
+        current_state, current_parameter, current_provenance = (
+            load_and_validate_arclength_seed(
+                resume_attempt_dir,
+                resume_accepted[-1],
+                template,
+                args.raw_tolerance,
+            )
+        )
+        continuation_resume_provenance = {
+            "directory": str(args.resume_arclength_dir.resolve()),
+            "status": resume_record["status"],
+            "source_commit": resume_source,
+            "failure_record_sha256": sha256_file(resume_record_path),
+            "attempt_record_sha256": {
+                path.name: sha256_file(path) for path in attempt_paths
+            },
+            "previous_accepted_seed": previous_provenance,
+            "current_accepted_seed": current_provenance,
+        }
+
+    require(
+        abs(current_parameter - previous_parameter) > np.finfo(float).eps,
+        "last accepted seed pair has zero parameter increment",
+    )
     require(current_parameter < args.target_lid, "failed run already reached the target")
 
     transform = LogStateTransform((30, 30, 17))
+    calibration_previous_encoded = transform.encode(calibration_previous_state)
+    calibration_current_encoded = transform.encode(calibration_current_state)
     previous_encoded = transform.encode(previous_state)
     current_encoded = transform.encode(current_state)
     selected_parameter_scale = (
         balanced_parameter_scale(
-            previous_encoded,
-            previous_parameter,
-            current_encoded,
-            current_parameter,
+            calibration_previous_encoded,
+            calibration_previous_parameter,
+            calibration_current_encoded,
+            calibration_current_parameter,
             parameter_fraction=args.parameter_metric_fraction,
         )
         if args.parameter_scale is None
@@ -473,7 +588,14 @@ def main() -> None:
         30 * 30 * 17,
         parameter_scale=selected_parameter_scale,
     )
-    metric_diagnostics = secant_metric_diagnostics(
+    calibration_metric_diagnostics = secant_metric_diagnostics(
+        calibration_previous_encoded,
+        calibration_previous_parameter,
+        calibration_current_encoded,
+        calibration_current_parameter,
+        metric,
+    )
+    initial_metric_diagnostics = secant_metric_diagnostics(
         previous_encoded,
         previous_parameter,
         current_encoded,
@@ -481,8 +603,8 @@ def main() -> None:
         metric,
     )
     require(
-        0.1 <= metric_diagnostics.parameter_fraction <= 0.9,
-        "declared pseudo-arclength metric degenerates toward fixed-state or "
+        0.1 <= calibration_metric_diagnostics.parameter_fraction <= 0.9,
+        "calibrated pseudo-arclength metric degenerates toward fixed-state or "
         "fixed-parameter continuation",
     )
     reference_tangent = normalized_secant_tangent(
@@ -516,22 +638,49 @@ def main() -> None:
 
     for attempt_number in range(1, args.maximum_attempts + 1):
         started = time.time()
-        result = solve_r26_pseudo_arclength_step(
-            template,
-            previous_state,
-            previous_parameter,
-            current_state,
-            current_parameter,
-            step_length,
-            options=controls,
-            reference_tangent=reference_tangent,
-        )
+        try:
+            result = solve_r26_pseudo_arclength_step(
+                template,
+                previous_state,
+                previous_parameter,
+                current_state,
+                current_parameter,
+                step_length,
+                options=controls,
+                reference_tangent=reference_tangent,
+            )
+        except Exception as error:
+            fatal_metric = secant_metric_diagnostics(
+                transform.encode(previous_state),
+                previous_parameter,
+                transform.encode(current_state),
+                current_parameter,
+                metric,
+            )
+            write_json(
+                args.output_dir / "fatal_continuation_error.json",
+                {
+                    "attempt": attempt_number,
+                    "from_parameter": current_parameter,
+                    "step_length": step_length,
+                    "parameter_scale": selected_parameter_scale,
+                    "state_metric_fraction": fatal_metric.state_fraction,
+                    "parameter_metric_fraction": fatal_metric.parameter_fraction,
+                    "exception_type": type(error).__name__,
+                    "exception_message": str(error),
+                    "accepted_attempts_before_error": sum(
+                        bool(row["accepted"]) for row in records
+                    ),
+                },
+            )
+            raise
         record: dict[str, object] = {
             "attempt": attempt_number,
             "from_parameter": current_parameter,
             "predicted_parameter": result.predicted_parameter,
             "corrected_parameter": result.parameter,
             "step_length": step_length,
+            "parameter_scale": selected_parameter_scale,
             "accepted": result.accepted,
             "elapsed_seconds": time.time() - started,
             "raw_acceptance_gate": result.raw_acceptance_gate,
@@ -574,10 +723,10 @@ def main() -> None:
         records.append(record)
 
         if not result.accepted:
-            step_length *= 0.5
-            if step_length < minimum_step:
+            if step_length <= minimum_step * (1.0 + 8.0 * np.finfo(float).eps):
                 termination = "minimum_arclength_step_rejected"
                 break
+            step_length = max(minimum_step, 0.5 * step_length)
             continue
 
         old_current_state = current_state
@@ -665,20 +814,26 @@ def main() -> None:
             "directory": str(args.failed_run_dir.resolve()),
             "source_commit": source_commit,
             "failed_summary_sha256": sha256_file(summary_path),
-            "previous_seed": previous_provenance,
-            "current_seed": current_provenance,
+            "previous_seed": calibration_previous_provenance,
+            "current_seed": calibration_current_provenance,
         },
         "failed_arclength_provenance": resume_provenance,
+        "continuation_resume_provenance": continuation_resume_provenance,
         "arclength_controls": {
             "parameter_scale": selected_parameter_scale,
             "parameter_scale_mode": (
-                "secant_balanced" if args.parameter_scale is None else "explicit"
+                "secant_calibrated_fixed" if args.parameter_scale is None else "explicit"
             ),
+            "metric_policy": "fixed_after_non_degenerate_calibration",
             "requested_parameter_metric_fraction": args.parameter_metric_fraction,
-            "initial_state_metric_fraction": metric_diagnostics.state_fraction,
-            "initial_parameter_metric_fraction": metric_diagnostics.parameter_fraction,
-            "initial_state_rms": metric_diagnostics.state_rms,
-            "initial_parameter_increment": metric_diagnostics.parameter_increment,
+            "calibration_state_metric_fraction": calibration_metric_diagnostics.state_fraction,
+            "calibration_parameter_metric_fraction": calibration_metric_diagnostics.parameter_fraction,
+            "calibration_state_rms": calibration_metric_diagnostics.state_rms,
+            "calibration_parameter_increment": calibration_metric_diagnostics.parameter_increment,
+            "initial_state_metric_fraction": initial_metric_diagnostics.state_fraction,
+            "initial_parameter_metric_fraction": initial_metric_diagnostics.parameter_fraction,
+            "initial_state_rms": initial_metric_diagnostics.state_rms,
+            "initial_parameter_increment": initial_metric_diagnostics.parameter_increment,
             "initial_secant_length": initial_secant_length,
             "initial_step": declared_initial_step,
             "minimum_step": minimum_step,

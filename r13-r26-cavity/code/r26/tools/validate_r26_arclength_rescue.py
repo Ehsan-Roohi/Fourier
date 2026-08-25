@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--raw-tolerance", type=float, default=1.0e-8)
     parser.add_argument("--expected-target-lid", type=float, required=True)
     parser.add_argument("--expected-failed-arclength-source-commit")
+    parser.add_argument("--expected-continuation-resume-source-commit")
     parser.add_argument("--expected-parameter-metric-fraction", type=float)
     args = parser.parse_args()
 
@@ -107,6 +108,29 @@ def main() -> None:
                 ),
                 "resume maximum step is not the prior accepted step",
             )
+    if args.expected_continuation_resume_source_commit is not None:
+        require(
+            len(args.expected_continuation_resume_source_commit) == 40,
+            "continuation-resume commit SHA has wrong length",
+        )
+        continuation_resume = arc.get("continuation_resume_provenance") or {}
+        require(
+            continuation_resume.get("source_commit")
+            == args.expected_continuation_resume_source_commit,
+            "continuation-resume source mismatch",
+        )
+        require(
+            continuation_resume.get("status")
+            == "R26_N30_BALANCED_ARCLENGTH_RESCUE_FAILED",
+            "continuation-resume status mismatch",
+        )
+        for name in ("previous_accepted_seed", "current_accepted_seed"):
+            seed = continuation_resume.get(name) or {}
+            require(
+                float(seed.get("independent_raw_gate", math.inf))
+                <= args.raw_tolerance,
+                f"{name} failed its independent raw gate",
+            )
     if args.expected_parameter_metric_fraction is not None:
         expected_fraction = args.expected_parameter_metric_fraction
         require(
@@ -114,8 +138,13 @@ def main() -> None:
             "expected parameter metric fraction is outside the admissible interval",
         )
         require(
-            controls.get("parameter_scale_mode") == "secant_balanced",
-            "arclength metric was not secant-balanced",
+            controls.get("parameter_scale_mode") == "secant_calibrated_fixed",
+            "arclength metric was not calibrated and frozen",
+        )
+        require(
+            controls.get("metric_policy")
+            == "fixed_after_non_degenerate_calibration",
+            "arclength metric policy changed",
         )
         require(
             math.isclose(
@@ -126,11 +155,13 @@ def main() -> None:
             ),
             "requested parameter metric fraction mismatch",
         )
-        state_fraction = float(controls.get("initial_state_metric_fraction"))
-        parameter_fraction = float(controls.get("initial_parameter_metric_fraction"))
+        state_fraction = float(controls.get("calibration_state_metric_fraction"))
+        parameter_fraction = float(
+            controls.get("calibration_parameter_metric_fraction")
+        )
         require(
             math.isclose(parameter_fraction, expected_fraction, rel_tol=0.0, abs_tol=2.0e-14),
-            "initial parameter metric fraction mismatch",
+            "calibration parameter metric fraction mismatch",
         )
         require(
             math.isclose(
@@ -139,7 +170,25 @@ def main() -> None:
                 rel_tol=0.0,
                 abs_tol=2.0e-14,
             ),
-            "initial state metric fraction mismatch",
+            "calibration state metric fraction mismatch",
+        )
+        initial_state_fraction = float(controls.get("initial_state_metric_fraction"))
+        initial_parameter_fraction = float(
+            controls.get("initial_parameter_metric_fraction")
+        )
+        require(
+            0.0 <= initial_parameter_fraction <= 1.0
+            and 0.0 <= initial_state_fraction <= 1.0,
+            "initial secant metric fractions are outside [0, 1]",
+        )
+        require(
+            math.isclose(
+                initial_parameter_fraction + initial_state_fraction,
+                1.0,
+                rel_tol=0.0,
+                abs_tol=2.0e-14,
+            ),
+            "initial secant metric fractions do not sum to one",
         )
         initial_secant = float(controls.get("initial_secant_length"))
         initial_step = float(controls.get("initial_step"))
@@ -198,8 +247,9 @@ def main() -> None:
             parameter_fraction = float(row.get("parameter_metric_fraction", -1.0))
             state_fraction = float(row.get("state_metric_fraction", -1.0))
             require(
-                0.1 <= parameter_fraction <= 0.9,
-                "attempt parameter metric fraction left the admissible interval",
+                0.0 <= parameter_fraction <= 1.0
+                and 0.0 <= state_fraction <= 1.0,
+                "attempt metric fractions left [0, 1]",
             )
             require(
                 math.isclose(
@@ -209,6 +259,15 @@ def main() -> None:
                     abs_tol=2.0e-14,
                 ),
                 "attempt metric fractions do not sum to one",
+            )
+            require(
+                math.isclose(
+                    float(row.get("parameter_scale")),
+                    float(controls.get("parameter_scale")),
+                    rel_tol=0.0,
+                    abs_tol=2.0e-14,
+                ),
+                "attempt changed the fixed calibrated parameter scale",
             )
         if bool(row.get("accepted")):
             require(
