@@ -18,6 +18,8 @@ from tests import (
     test_r26_state,
     test_r26_stretched_grid,
     test_r26_tensor_closures,
+    test_r26_thor_audit,
+    test_r26_thor_solver,
     test_r26_wall_conditions,
     test_maxwell_contract,
 )
@@ -30,6 +32,8 @@ def suite() -> unittest.TestSuite:
         test_r26_arclength,
         test_r26_stretched_grid,
         test_r26_tensor_closures,
+        test_r26_thor_solver,
+        test_r26_thor_audit,
         test_r26_bulk_equations,
         test_r26_checkerboard,
         test_r26_wall_conditions,

@@ -792,8 +792,17 @@ def compatible_fv_bulk_residual(
     pressure = rho * theta
     pressure_x = _face_average(pressure, 1)
     pressure_y = _face_average(pressure, 0)
-    momentum_flux_x = faces.mass_x[..., None] * transported(velocity, 1) + faces.sigma_x[..., :, 0]
-    momentum_flux_y = faces.mass_y[..., None] * transported(velocity, 0) + faces.sigma_y[..., :, 1]
+    # Preserve the historical compatible-FV operator bit for bit: its central
+    # momentum flux transports the Rhie--Chow face velocity itself.  Only the
+    # explicitly selected CUBISTA path replaces that transported value.
+    transported_velocity_x = (
+        faces.velocity_x if scheme == "central" else transported(velocity, 1)
+    )
+    transported_velocity_y = (
+        faces.velocity_y if scheme == "central" else transported(velocity, 0)
+    )
+    momentum_flux_x = faces.mass_x[..., None] * transported_velocity_x + faces.sigma_x[..., :, 0]
+    momentum_flux_y = faces.mass_y[..., None] * transported_velocity_y + faces.sigma_y[..., :, 1]
     momentum_flux_x[..., 0] += pressure_x
     momentum_flux_y[..., 1] += pressure_y
     new_momentum = wall_bounded_face_divergence(

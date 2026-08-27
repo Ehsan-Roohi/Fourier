@@ -62,6 +62,9 @@ N30_FOLD_RESUME_SUBMIT = (
 THOR_DRIVER = R26_ROOT / "analysis" / "run_r26_thor_validation.py"
 THOR_GATE_SLURM = R26_ROOT / "hpc" / "r26_kn020_thor_gate_n8_n16.slurm"
 THOR_GATE_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_thor_gate_n8_n16.sh"
+THOR_AUDIT = R26_ROOT / "tools" / "audit_r26_thor_cross_solver.py"
+THOR_N24_SLURM = R26_ROOT / "hpc" / "r26_kn020_thor_cross_solver_n24.slurm"
+THOR_N24_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_thor_cross_solver_n24.sh"
 RANA_SOURCE_AUDITOR = R26_ROOT / "tools" / "audit_rana_code_saturne_sources.py"
 sys.path.insert(0, str(CODE))
 
@@ -139,6 +142,46 @@ class MaxwellContract(unittest.TestCase):
         self.assertIn('"Re": 50.0', source)
         self.assertIn('"property_update_relaxation": 2.0e-4', source)
         self.assertIn("the supplied archive contains source but no mesh or result fields", source)
+
+    def test_thor_cross_solver_n24_is_numerically_ranked_and_fail_closed(self) -> None:
+        script = THOR_N24_SLURM.read_text()
+        submit = THOR_N24_SUBMIT.read_text()
+        auditor = THOR_AUDIT.read_text()
+        self.assertIn(
+            'EXPECTED_THOR_GATE_REF="a51d7e80aefea529d26933556222bfd068d83c16"',
+            script,
+        )
+        self.assertIn(
+            'EXPECTED_LEGACY_GATE_REF="8cbd874eea68dd475faa3f5e3fb318b49cc0c665"',
+            script,
+        )
+        self.assertIn("validate_r26_globalization_gate.py", script)
+        self.assertIn("audit_r26_thor_cross_solver.py", script)
+        self.assertIn("--minimum-scaled-rcond 1e-8", script)
+        self.assertIn("--maximum-profile-nrms 0.05", script)
+        self.assertIn("--maximum-line-nrms 0.15", script)
+        self.assertIn("--maximum-DG-relative-difference 0.02", script)
+        self.assertIn("--nodes 24", script)
+        self.assertIn('--initial-state "$R26_THOR_GATE_DIR/N16/thor_state.npz"', script)
+        self.assertIn('"n28_authorized": False', script)
+        self.assertIn('"n30_authorized": False', script)
+        self.assertIn('"production_accepted": False', script)
+        self.assertNotIn("--nodes 28", script)
+        self.assertNotIn("--nodes 30", script)
+        self.assertNotIn("arclength", script.lower())
+        self.assertIn("numerical_jacobian_rank", auditor)
+        self.assertIn("compare_cross_solver_profiles", auditor)
+        self.assertIn('"n24_authorized": n24_authorized', auditor)
+        self.assertIn("R26_THOR_N24_REF", submit)
+        self.assertIn("r26_kn020_thor_cross_solver_n24.slurm", submit)
+        self.assertTrue(THOR_AUDIT.is_file())
+        self.assertTrue(THOR_N24_SLURM.is_file())
+        self.assertTrue(THOR_N24_SUBMIT.is_file())
+
+    def test_historical_central_momentum_transport_keeps_rhie_chow_faces(self) -> None:
+        source = (R26_ROOT / "r26_fv_backend.py").read_text()
+        self.assertIn('faces.velocity_x if scheme == "central"', source)
+        self.assertIn('faces.velocity_y if scheme == "central"', source)
 
     def test_n30_balanced_arclength_is_gate_locked_and_fail_closed(self) -> None:
         script = N30_BALANCED_ARCLENGTH_SLURM.read_text()

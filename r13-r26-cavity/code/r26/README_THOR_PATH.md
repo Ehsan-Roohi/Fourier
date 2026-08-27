@@ -58,6 +58,25 @@ No N28/N30 job is part of this commit. The next stage after a passed N8/N16
 gate is an independent final-Jacobian and profile comparison, not another
 continuation run.
 
+## Numerical-rank/cross-solver audit and conditional N24
+
+After the immutable N8/N16 THOR gate passes,
+`r26_kn020_thor_cross_solver_n24.slurm` performs the declared next stage. It
+independently revalidates the historical SER--PTC N8/N16 gate, recomputes both
+solvers' raw residuals with their own spatial operators, builds the final
+colored numerical THOR Jacobians, and obtains their actual dense singular
+spectra after deterministic row/column scaling. A structural-rank declaration
+or successful ILU is not treated as numerical full-rank evidence.
+
+All 17 planar R26 components, including the four independent `m_ijk`
+components, are compared on a common grid and on the vertical centreline and
+the `y=0.9` horizontal line. Rana D/G differences are recorded separately.
+Only if both N8 and N16 pass the raw and numerical-rank gates, all-component
+normalized RMS disagreement stays below 5%, line disagreement below 15%, and
+the Rana D/G disagreement below 2%, is one N24 fixed-case solve started from
+the accepted THOR N16 state. N28 and N30 remain unauthorized, and even an
+accepted N24 record keeps `production_accepted=false`.
+
 ## Auditing the supplied Code_Saturne sources
 
 The legacy source ZIP itself is not redistributed. After extracting its R13
