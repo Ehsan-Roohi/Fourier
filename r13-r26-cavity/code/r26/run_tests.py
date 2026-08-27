@@ -12,6 +12,7 @@ from tests import (
     test_r26_checkerboard,
     test_r26_diagnostics,
     test_r26_fv_backend,
+    test_r26_gu_emerson_algorithm,
     test_r26_postprocess,
     test_r26_raw_continuation,
     test_r26_solver,
@@ -40,6 +41,7 @@ def suite() -> unittest.TestSuite:
         test_r26_solver,
         test_r26_raw_continuation,
         test_r26_fv_backend,
+        test_r26_gu_emerson_algorithm,
         test_r26_diagnostics,
         test_r26_postprocess,
     ):
