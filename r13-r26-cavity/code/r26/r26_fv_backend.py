@@ -5,10 +5,11 @@ Gu & Emerson (JFM 636, 2009), section 5, specify a collocated finite-volume
 method, central diffusion/source differences, CUBISTA convection, SIMPLE, and
 Rhie--Chow interpolation.  They do not print their face coefficient formula.
 
-This verification backend implements the smallest documented subset needed by
-the monolithic steady solver:
+This verification backend implements the documented transport needed by both
+the monolithic steady solver and the pressure-based THOR-style path:
 
-* arithmetic central face convection (not CUBISTA);
+* arithmetic central face convection for backward compatibility, plus an
+  explicitly selectable bounded CUBISTA normalized-variable interpolation;
 * compatible face-gradient/face-divergence transport using the gradient and
   non-gradient moment split of equations (48)--(55), with ``Omega_G`` limited
   to the printed equation (27) ``grad(Delta/rho)`` term;
@@ -68,6 +69,11 @@ FV_PROVENANCE: Final[str] = (
 )
 
 DEFAULT_FV_FD_STEP_SCALE: Final[float] = 2.0e-6
+
+CUBISTA_PROVENANCE: Final[str] = (
+    "Alves--Oliveira--Pinho CUBISTA normalized-variable interpolation; "
+    "Gu--Emerson JFM 636 Sec. 5.2 pressure-based R26 transport"
+)
 
 
 def fv_absolute_difference_step(
@@ -180,6 +186,33 @@ def _second_derivative_diagonal(coordinate: np.ndarray) -> np.ndarray:
     return result
 
 
+def rhie_chow_inverse_momentum_diagonal(
+    mu: float | np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> np.ndarray:
+    """Return the audited cell coefficient used by Rhie--Chow/SIMPLE.
+
+    The coefficient is the inverse positive central-diffusion momentum
+    diagonal.  Exposing the same implementation to the nonlinear
+    preconditioner prevents the face interpolation and pressure-correction
+    equation from silently using different discrete operators.
+    """
+
+    xx = np.asarray(x, dtype=float)
+    yy = np.asarray(y, dtype=float)
+    viscosity = np.broadcast_to(np.asarray(mu, dtype=float), (yy.size, xx.size))
+    if not np.isfinite(viscosity).all() or np.any(viscosity <= 0.0):
+        raise FloatingPointError("mu must be finite and positive")
+    return 1.0 / (
+        viscosity
+        * (
+            _second_derivative_diagonal(xx)[None, :]
+            + _second_derivative_diagonal(yy)[:, None]
+        )
+    )
+
+
 def _face_average(field: np.ndarray, axis: int) -> np.ndarray:
     a = np.asarray(field, dtype=float)
     if axis == 1:
@@ -187,6 +220,84 @@ def _face_average(field: np.ndarray, axis: int) -> np.ndarray:
     if axis == 0:
         return 0.5 * (a[1:] + a[:-1])
     raise ValueError("face axis must be 0 or 1")
+
+
+def cubista_face_value(
+    field: np.ndarray,
+    face_flux: np.ndarray,
+    *,
+    axis: int,
+) -> np.ndarray:
+    """Return bounded CUBISTA values on faces normal to ``axis``.
+
+    ``face_flux`` is scalar and fixes the upwind direction.  The transported
+    ``field`` may have arbitrary trailing tensor dimensions.  On a face where
+    a remote-upwind node is unavailable, or where the normalized-variable
+    denominator is numerically zero, the method fails safely to first-order
+    upwind.  This is the standard deferred-convection boundary treatment; it
+    never extrapolates an unavailable ghost value.
+    """
+
+    value = np.asarray(field, dtype=float)
+    flux = np.asarray(face_flux, dtype=float)
+    if value.ndim < 2 or axis not in (0, 1):
+        raise ValueError("CUBISTA field needs two grid axes and axis 0 or 1")
+    expected = list(value.shape[:2])
+    expected[axis] -= 1
+    if flux.shape != tuple(expected):
+        raise ValueError("face_flux shape is incompatible with the transported field")
+    if not np.isfinite(value).all() or not np.isfinite(flux).all():
+        raise FloatingPointError("CUBISTA inputs must be finite")
+
+    moved = np.moveaxis(value, axis, 0)
+    flux_moved = np.moveaxis(flux, axis, 0)
+    n = moved.shape[0]
+    if n < 3:
+        raise ValueError("CUBISTA requires at least three nodes along the face axis")
+
+    left = moved[:-1]
+    right = moved[1:]
+    positive = flux_moved >= 0.0
+    trailing = (1,) * (value.ndim - 2)
+    positive_expanded = positive.reshape(positive.shape + trailing)
+    upwind = np.where(positive_expanded, left, right)
+    downwind = np.where(positive_expanded, right, left)
+
+    remote_positive = np.concatenate((moved[:1], moved[:-2]), axis=0)
+    remote_negative = np.concatenate((moved[2:], moved[-1:]), axis=0)
+    remote = np.where(positive_expanded, remote_positive, remote_negative)
+
+    denominator = downwind - remote
+    scale = np.maximum.reduce((np.abs(upwind), np.abs(downwind), np.abs(remote)))
+    regular = np.abs(denominator) > 32.0 * np.finfo(float).eps * np.maximum(1.0, scale)
+    normalized = np.divide(
+        upwind - remote,
+        denominator,
+        out=np.zeros_like(upwind),
+        where=regular,
+    )
+    bounded = (normalized > 0.0) & (normalized < 1.0)
+    face_normalized = normalized.copy()
+    first = bounded & (normalized < 3.0 / 8.0)
+    second = bounded & (normalized >= 3.0 / 8.0) & (normalized <= 3.0 / 4.0)
+    third = bounded & (normalized > 3.0 / 4.0)
+    face_normalized[first] = 7.0 / 4.0 * normalized[first]
+    face_normalized[second] = 3.0 / 4.0 * normalized[second] + 3.0 / 8.0
+    face_normalized[third] = 1.0 / 4.0 * normalized[third] + 3.0 / 4.0
+    result = np.where(
+        regular & bounded,
+        remote + face_normalized * denominator,
+        upwind,
+    )
+
+    boundary_positive = np.zeros_like(positive)
+    boundary_positive[0] = True
+    boundary_negative = np.zeros_like(positive)
+    boundary_negative[-1] = True
+    unavailable = (positive & boundary_positive) | ((~positive) & boundary_negative)
+    unavailable_expanded = unavailable.reshape(unavailable.shape + trailing)
+    result = np.where(unavailable_expanded, upwind, result)
+    return np.moveaxis(result, 0, axis)
 
 
 def _face_gradient(field: np.ndarray, x: np.ndarray, y: np.ndarray, axis: int) -> np.ndarray:
@@ -466,9 +577,7 @@ def compatible_face_fields(
     pressure = rho * theta
     grad_p_x = np.gradient(pressure, x, axis=1, edge_order=2)
     grad_p_y = np.gradient(pressure, y, axis=0, edge_order=2)
-    diagonal_x = _second_derivative_diagonal(x)
-    diagonal_y = _second_derivative_diagonal(y)
-    d_cell = 1.0 / (mu * (diagonal_x[None, :] + diagonal_y[:, None]))
+    d_cell = rhie_chow_inverse_momentum_diagonal(mu, x, y)
     velocity_x = _face_average(velocity, 1)
     velocity_y = _face_average(velocity, 0)
     dx_face = np.diff(x)[None, :]
@@ -586,16 +695,21 @@ def compatible_fv_bulk_residual(
     *,
     edge_order: int = 2,
     case: object | None = None,
+    convection_scheme: str = "central",
 ) -> np.ndarray:
     """Return planar-17 R26 rows with compatible FV transport divergences.
 
-    ``case`` is accepted only as a solver adapter convenience and is not used.
-    CUBISTA/SIMPLE outer iteration is not reproduced; convection is central
-    and the monolithic pressure coupling uses the stated Rhie--Chow face flux.
+    ``case`` selects the closure coefficient set.  ``convection_scheme`` is
+    either the historical arithmetic ``central`` interpolation or bounded
+    ``cubista``.  Pressure coupling always uses the same stated Rhie--Chow
+    normal face flux, independent of the transported-value interpolation.
     """
 
     if edge_order != 2:
         raise ValueError("compatible FV backend currently requires edge_order=2")
+    scheme = str(convection_scheme).lower()
+    if scheme not in {"central", "cubista"}:
+        raise ValueError("convection_scheme must be central or cubista")
     u = validate_planar_state(state)
     if u.ndim != 3 or min(u.shape[:2]) < 5:
         raise ValueError("state must have shape (ny,nx,17) with at least 5x5 nodes")
@@ -632,6 +746,12 @@ def compatible_fv_bulk_residual(
     )
     faces = compatible_face_fields(u, xx, yy, muv, closures)
     walls = compatible_wall_fluxes(u, closures)
+
+    def transported(field: np.ndarray, axis: int) -> np.ndarray:
+        if scheme == "central":
+            return _face_average(field, axis)
+        flux = faces.mass_x if axis == 1 else faces.mass_y
+        return cubista_face_value(field, flux, axis=axis)
 
     rho = np.asarray(tensors.rho)
     velocity = np.asarray(tensors.velocity)
@@ -672,8 +792,8 @@ def compatible_fv_bulk_residual(
     pressure = rho * theta
     pressure_x = _face_average(pressure, 1)
     pressure_y = _face_average(pressure, 0)
-    momentum_flux_x = faces.mass_x[..., None] * faces.velocity_x + faces.sigma_x[..., :, 0]
-    momentum_flux_y = faces.mass_y[..., None] * faces.velocity_y + faces.sigma_y[..., :, 1]
+    momentum_flux_x = faces.mass_x[..., None] * transported(velocity, 1) + faces.sigma_x[..., :, 0]
+    momentum_flux_y = faces.mass_y[..., None] * transported(velocity, 0) + faces.sigma_y[..., :, 1]
     momentum_flux_x[..., 0] += pressure_x
     momentum_flux_y[..., 1] += pressure_y
     new_momentum = wall_bounded_face_divergence(
@@ -687,8 +807,8 @@ def compatible_fv_bulk_residual(
 
     old_theta = theta * old_mass + rho * np.einsum("...i,...i->...", velocity, gtheta)
     old_theta += 2.0 / 3.0 * np.einsum("...ii->...", gq)
-    theta_flux_x = faces.mass_x * _face_average(theta, 1) + 2.0 / 3.0 * faces.q_x[..., 0]
-    theta_flux_y = faces.mass_y * _face_average(theta, 0) + 2.0 / 3.0 * faces.q_y[..., 1]
+    theta_flux_x = faces.mass_x * transported(theta, 1) + 2.0 / 3.0 * faces.q_x[..., 0]
+    theta_flux_y = faces.mass_y * transported(theta, 0) + 2.0 / 3.0 * faces.q_y[..., 1]
     new_theta = wall_bounded_face_divergence(
         theta_flux_x,
         theta_flux_y,
@@ -700,8 +820,8 @@ def compatible_fv_bulk_residual(
 
     old_stress = sigma * div_u[..., None, None] + np.einsum("...k,...kij->...ij", velocity, gs)
     old_stress += np.einsum("...kijk->...ij", gm)
-    stress_flux_x = faces.velocity_x[..., 0, None, None] * _face_average(sigma, 1) + faces.m_x[..., :, :, 0]
-    stress_flux_y = faces.velocity_y[..., 1, None, None] * _face_average(sigma, 0) + faces.m_y[..., :, :, 1]
+    stress_flux_x = faces.velocity_x[..., 0, None, None] * transported(sigma, 1) + faces.m_x[..., :, :, 0]
+    stress_flux_y = faces.velocity_y[..., 1, None, None] * transported(sigma, 0) + faces.m_y[..., :, :, 1]
     new_stress = wall_bounded_face_divergence(
         stress_flux_x,
         stress_flux_y,
@@ -713,8 +833,8 @@ def compatible_fv_bulk_residual(
 
     old_heat = q * div_u[..., None] + np.einsum("...j,...ji->...i", velocity, gq)
     old_heat += 0.5 * np.einsum("...jij->...i", gr)
-    heat_flux_x = faces.velocity_x[..., 0, None] * _face_average(q, 1) + 0.5 * faces.R_x[..., :, 0]
-    heat_flux_y = faces.velocity_y[..., 1, None] * _face_average(q, 0) + 0.5 * faces.R_y[..., :, 1]
+    heat_flux_x = faces.velocity_x[..., 0, None] * transported(q, 1) + 0.5 * faces.R_x[..., :, 0]
+    heat_flux_y = faces.velocity_y[..., 1, None] * transported(q, 0) + 0.5 * faces.R_y[..., :, 1]
     new_heat = wall_bounded_face_divergence(
         heat_flux_x,
         heat_flux_y,
@@ -726,8 +846,8 @@ def compatible_fv_bulk_residual(
 
     old_m = mm * div_u[..., None, None, None] + np.einsum("...l,...lijk->...ijk", velocity, gm)
     old_m += np.asarray(closure_derivatives.div_phi)
-    m_flux_x = faces.velocity_x[..., 0, None, None, None] * _face_average(mm, 1) + faces.phi_x[..., :, :, :, 0]
-    m_flux_y = faces.velocity_y[..., 1, None, None, None] * _face_average(mm, 0) + faces.phi_y[..., :, :, :, 1]
+    m_flux_x = faces.velocity_x[..., 0, None, None, None] * transported(mm, 1) + faces.phi_x[..., :, :, :, 0]
+    m_flux_y = faces.velocity_y[..., 1, None, None, None] * transported(mm, 0) + faces.phi_y[..., :, :, :, 1]
     new_m = wall_bounded_face_divergence(
         m_flux_x,
         m_flux_y,
@@ -739,8 +859,8 @@ def compatible_fv_bulk_residual(
 
     old_R = rr * div_u[..., None, None] + np.einsum("...k,...kij->...ij", velocity, gr)
     old_R += np.asarray(closure_derivatives.div_psi)
-    R_flux_x = faces.velocity_x[..., 0, None, None] * _face_average(rr, 1) + faces.psi_x[..., :, :, 0]
-    R_flux_y = faces.velocity_y[..., 1, None, None] * _face_average(rr, 0) + faces.psi_y[..., :, :, 1]
+    R_flux_x = faces.velocity_x[..., 0, None, None] * transported(rr, 1) + faces.psi_x[..., :, :, 0]
+    R_flux_y = faces.velocity_y[..., 1, None, None] * transported(rr, 0) + faces.psi_y[..., :, :, 1]
     new_R = wall_bounded_face_divergence(
         R_flux_x,
         R_flux_y,
@@ -752,8 +872,8 @@ def compatible_fv_bulk_residual(
 
     old_delta = delta * div_u + np.einsum("...i,...i->...", velocity, gd)
     old_delta += np.asarray(closure_derivatives.div_Omega)
-    delta_flux_x = faces.velocity_x[..., 0] * _face_average(delta, 1) + faces.Omega_x[..., 0]
-    delta_flux_y = faces.velocity_y[..., 1] * _face_average(delta, 0) + faces.Omega_y[..., 1]
+    delta_flux_x = faces.velocity_x[..., 0] * transported(delta, 1) + faces.Omega_x[..., 0]
+    delta_flux_y = faces.velocity_y[..., 1] * transported(delta, 0) + faces.Omega_y[..., 1]
     new_delta = wall_bounded_face_divergence(
         delta_flux_x,
         delta_flux_y,
@@ -772,7 +892,11 @@ def compatible_fv_bulk_residual(
         m=_replace_interior(raw.m, old_m, new_m),
         R=_replace_interior(raw.R, old_R, new_R),
         Delta=_replace_interior(raw.Delta, old_delta, new_delta),
-        provenance=FV_PROVENANCE,
+        provenance=(
+            FV_PROVENANCE
+            if scheme == "central"
+            else f"{FV_PROVENANCE}; {CUBISTA_PROVENANCE}"
+        ),
     )
     planar = corrected.as_planar17()
     if not np.isfinite(planar).all():
@@ -780,17 +904,45 @@ def compatible_fv_bulk_residual(
     return planar
 
 
+def thor_fv_bulk_residual(
+    state: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    mu: float | np.ndarray = 1.0,
+    body_force: np.ndarray | None = None,
+    *,
+    edge_order: int = 2,
+    case: object | None = None,
+) -> np.ndarray:
+    """THOR-style compatible R26 transport with bounded CUBISTA convection."""
+
+    return compatible_fv_bulk_residual(
+        state,
+        x,
+        y,
+        mu,
+        body_force,
+        edge_order=edge_order,
+        case=case,
+        convection_scheme="cubista",
+    )
+
+
 __all__ = [
     "CompatibleFaceFields",
     "CompatibleWallFluxes",
+    "CUBISTA_PROVENANCE",
     "DEFAULT_FV_FD_STEP_SCALE",
     "FV_PROVENANCE",
     "compatible_face_fields",
     "compatible_fv_bulk_residual",
     "compatible_wall_fluxes",
+    "cubista_face_value",
     "fv_absolute_difference_step",
     "impermeable_wall_mass_divergence",
     "interior_control_volume_widths",
+    "rhie_chow_inverse_momentum_diagonal",
+    "thor_fv_bulk_residual",
     "wall_bounded_control_volume_weights",
     "wall_bounded_face_divergence",
 ]

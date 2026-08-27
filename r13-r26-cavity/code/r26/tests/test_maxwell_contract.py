@@ -59,6 +59,10 @@ N30_FOLD_RESUME_SLURM = (
 N30_FOLD_RESUME_SUBMIT = (
     R26_ROOT / "hpc" / "submit_r26_kn020_n30_fold_continuation_resume.sh"
 )
+THOR_DRIVER = R26_ROOT / "analysis" / "run_r26_thor_validation.py"
+THOR_GATE_SLURM = R26_ROOT / "hpc" / "r26_kn020_thor_gate_n8_n16.slurm"
+THOR_GATE_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_thor_gate_n8_n16.sh"
+RANA_SOURCE_AUDITOR = R26_ROOT / "tools" / "audit_rana_code_saturne_sources.py"
 sys.path.insert(0, str(CODE))
 
 from analysis.run_jfm_observability_continuation import jsonable as continuation_jsonable  # noqa: E402
@@ -70,6 +74,7 @@ from r26_cases import (  # noqa: E402
     jfm_maxwell_cavity_case,
 )
 from analysis.run_r26_balanced_metric_gate import jsonable as metric_gate_jsonable  # noqa: E402
+from analysis.run_r26_thor_validation import jsonable as thor_jsonable  # noqa: E402
 from r26_postprocess import _jsonable as postprocess_jsonable  # noqa: E402
 from r26_tensor_closures import closure_coefficients  # noqa: E402
 from r26_wall_conditions import WallParameters  # noqa: E402
@@ -95,6 +100,7 @@ class MaxwellContract(unittest.TestCase):
             arclength_jsonable,
             continuation_jsonable,
             postprocess_jsonable,
+            thor_jsonable,
         )
         for serializer in serializers:
             with self.subTest(serializer=serializer.__module__):
@@ -103,6 +109,36 @@ class MaxwellContract(unittest.TestCase):
                 self.assertIs(serializer(np.bool_(False)), False)
                 self.assertEqual(serializer(0), 0)
                 self.assertIs(type(serializer(0)), int)
+
+    def test_thor_gate_is_fixed_case_n8_n16_only_and_fail_closed(self) -> None:
+        script = THOR_GATE_SLURM.read_text()
+        submit = THOR_GATE_SUBMIT.read_text()
+        driver = THOR_DRIVER.read_text()
+        self.assertIn("run_r26_thor_validation.py", script)
+        self.assertIn("--case-family jfm-maxwell", script)
+        self.assertIn("--nodes 8", script)
+        self.assertIn("--nodes 16", script)
+        self.assertIn('--initial-state "$R26_THOR_OUT/N8/thor_state.npz"', script)
+        self.assertIn('"n28_authorized": False', script)
+        self.assertIn('"n30_authorized": False', script)
+        self.assertIn('"production_accepted": False', script)
+        self.assertNotIn("--nodes 28", script)
+        self.assertNotIn("--nodes 30", script)
+        self.assertNotIn("arclength", script.lower())
+        self.assertIn("R26_THOR_REF", submit)
+        self.assertIn("r26_kn020_thor_gate_n8_n16.slurm", submit)
+        self.assertIn('"production_accepted": False', driver)
+        self.assertIn("independent final numerical-Jacobian rank", driver)
+        self.assertTrue(THOR_GATE_SLURM.is_file())
+        self.assertTrue(THOR_GATE_SUBMIT.is_file())
+
+    def test_rana_source_auditor_cannot_authorize_profile_validation(self) -> None:
+        source = RANA_SOURCE_AUDITOR.read_text()
+        self.assertIn('"numerical_profile_validation_authorized": False', source)
+        self.assertIn('"Kn": 0.02', source)
+        self.assertIn('"Re": 50.0', source)
+        self.assertIn('"property_update_relaxation": 2.0e-4', source)
+        self.assertIn("the supplied archive contains source but no mesh or result fields", source)
 
     def test_n30_balanced_arclength_is_gate_locked_and_fail_closed(self) -> None:
         script = N30_BALANCED_ARCLENGTH_SLURM.read_text()
