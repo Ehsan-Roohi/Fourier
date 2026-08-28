@@ -3,7 +3,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=128G
+#SBATCH --mem=64G
 #SBATCH --time=2-00:00:00
 #SBATCH --output=r26-ge-stand-%j.out
 #SBATCH --error=r26-ge-stand-%j.err
