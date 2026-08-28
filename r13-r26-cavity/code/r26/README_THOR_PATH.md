@@ -90,3 +90,18 @@ python3 tools/audit_rana_code_saturne_sources.py \
 
 This authorizes architecture reuse only. The supplied archive has no mesh or
 result fields and is not a numerical reference for the present 100 m/s case.
+
+## Source-linearized Gu--Emerson N16 resume
+
+The standalone N8/N16 ladder established two independent accepted N8 roots,
+but its first N16 path diverged because all nonlinear source terms were
+included in the numerical field matrix.  The supplied Rana R26 module instead
+keeps collision and diffusion implicit while applying fixed history factors to
+the nonlinear right-hand sides: 0.01 for stress and heat flux, 0.5 for `m` and
+`R`, and 0.1 for `Delta`.  The source-linearized resume reproduces that split,
+reassembles every field matrix on every outer sweep, independently revalidates
+the two accepted N8 states, and ignores every failed N16 checkpoint.
+
+The resume remains a validation gate.  N24 is authorized only when both N16
+paths pass the complete raw physical residual and agree within the declared
+root tolerance; N28, N29, N30 and production acceptance remain blocked.

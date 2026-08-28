@@ -46,10 +46,10 @@ PRIOR_CROSS_GATE_STATUS = "R26_GU_EMERSON_RECONSTRUCTION_CROSS_GATE_PASSED"
 PRIOR_CROSS_GATE_COMMIT = "c9c3bc07d14a691d2d4ed70533b46f8daed53726"
 ROOT_ABSOLUTE_TOLERANCE = 1.0e-6
 
-# The Rana Code_Saturne R26 user source declares only these per-equation
-# linear tolerances.  It does not declare custom under-relaxation factors in
-# cs_user_parameters_R26.f90.  The Python controls therefore remain explicitly
-# labelled as reconstruction controls by GuEmersonReconstructionOptions.
+# The parameter source declares these per-equation linear tolerances.  The
+# separate ``cs_user_modules.f90`` source does declare fixed nonlinear-source
+# history factors; those were not used by this failed ladder and are introduced
+# only by the source-linearized N16 resume.
 RANA_CODE_SATURNE_CONTROL_EVIDENCE = {
     "archive": "SRCR26_22nd_NOV.tar",
     "source": "SRCR26_22nd_NOV/cs_user_parameters_R26.f90",
@@ -59,6 +59,15 @@ RANA_CODE_SATURNE_CONTROL_EVIDENCE = {
     "temperature_linear_relative_tolerance": 1.0e-6,
     "user_scalar_linear_relative_tolerance": 1.0e-5,
     "custom_under_relaxation_factors_declared_in_source": False,
+    "nonlinear_source_history_declared_in_cs_user_modules": True,
+    "nonlinear_source_history_factors": {
+        "stress": 1.0e-2,
+        "heat_flux": 1.0e-2,
+        "m": 5.0e-1,
+        "R": 5.0e-1,
+        "Delta": 1.0e-1,
+    },
+    "cs_user_modules_sha256": "d92e0142776d90499e2beea4a8b3b37b590597f66b61f43bb49f58ade73a884b",
 }
 
 

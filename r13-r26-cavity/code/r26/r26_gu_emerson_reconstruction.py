@@ -30,6 +30,10 @@ from scipy.optimize._numdiff import approx_derivative
 from scipy.sparse import coo_matrix, csc_matrix
 from scipy.sparse.linalg import lsmr, splu
 
+from r26_bulk_equations import (
+    closure_derivatives_on_grid,
+    gu_emerson_nonlinear_sources,
+)
 from r26_cases import CavityCase
 from r26_discretization import R26NodeBVP, linear_wall_extrapolation
 from r26_fv_backend import (
@@ -52,6 +56,7 @@ from r26_gu_emerson_variables import (
     state_from_gu_emerson_fields,
 )
 from r26_state import planar_state_to_tensors
+from r26_tensor_closures import closures_from_tensors, finite_difference_gradients
 from r26_thor_solver import _pressure_correction_matrix
 from r26_wall_conditions import (
     WallFreeQuantities,
@@ -78,6 +83,24 @@ FIELD_SLOTS: Final[dict[str, tuple[int, ...]]] = {
     "omega": (12, 13, 14, 15),
     "gamma": (9, 10, 11),
     "chi": (16,),
+}
+
+# The supplied Rana Code_Saturne R26 implementation updates the nonlinear
+# right-hand-side arrays with these fixed history factors before the
+# segregated scalar equations are assembled.  They are not generic field
+# under-relaxation factors: keeping the distinction is essential because the
+# collision and diffusion contributions remain implicit in the matrix.  See
+# ``SRCR26_22nd_NOV/cs_user_modules.f90`` (SHA-256
+# d92e0142776d90499e2beea4a8b3b37b590597f66b61f43bb49f58ade73a884b),
+# routines ``cs_user_source_sigma``, ``cs_user_source_heatflux``,
+# ``cs_user_source_mijk``, ``cs_user_source_rij`` and
+# ``cs_user_source_delta``.
+RANA_SOURCE_HISTORY_RELAXATION: Final[dict[str, float]] = {
+    "g": 1.0e-2,
+    "h": 1.0e-2,
+    "omega": 5.0e-1,
+    "gamma": 5.0e-1,
+    "chi": 1.0e-1,
 }
 
 
@@ -155,10 +178,16 @@ class GuEmersonReconstructionOptions:
             ),
             "source_term_linearisation": NumericalControlSource(
                 (
-                    "coloured field-family defect matrices refreshed every "
-                    f"{self.matrix_refresh_interval} fixed Picard sweeps"
+                    "Rana Code_Saturne fixed nonlinear-source history factors "
+                    "g=0.01, h=0.01, omega=0.5, gamma=0.5, chi=0.1; "
+                    "collision/diffusion retained in coloured field matrices "
+                    f"refreshed every {self.matrix_refresh_interval} fixed Picard sweeps"
                 ),
-                tag,
+                (
+                    "SRCR26_22nd_NOV/cs_user_modules.f90 SHA-256 "
+                    "d92e0142776d90499e2beea4a8b3b37b590597f66b61f43bb49f58ade73a884b; "
+                    "matrix construction remains a documented local reconstruction"
+                ),
             ),
             "rhie_chow_face_coefficient": NumericalControlSource(
                 "inverse central-diffusion momentum diagonal from r26_fv_backend",
@@ -260,6 +289,7 @@ class _SegregatedReconstructionOperators:
         self.executed_stages: list[str] = []
         self._block_matrices: dict[str, csc_matrix] = {}
         self._block_factors: dict[str, object | None] = {}
+        self._source_history: np.ndarray | None = None
         self.completed_sweeps = 0
 
     def _physical(self, fields: GuEmersonFields) -> np.ndarray:
@@ -271,11 +301,72 @@ class _SegregatedReconstructionOperators:
             mu=mu,
         )
 
+    def _nonlinear_sources(self, state: np.ndarray) -> np.ndarray:
+        """Pack the five printed nonlinear source families in planar rows."""
+
+        case = self.problem.case
+        mu = case.mu(state[..., 3])
+        tensors = planar_state_to_tensors(state)
+        gradients = finite_difference_gradients(state, x=case.x, y=case.y, edge_order=2)
+        closures = closures_from_tensors(
+            tensors,
+            gradients,
+            mu=mu,
+            coefficient_mode=case.r26_closure_mode,
+        )
+        derivatives = closure_derivatives_on_grid(closures, case.x, case.y, edge_order=2)
+        source = gu_emerson_nonlinear_sources(
+            tensors,
+            gradients,
+            closures,
+            derivatives,
+            mu=mu,
+        )
+        packed = np.zeros_like(state)
+        packed[..., 4] = source.Q[..., 0]
+        packed[..., 5] = source.Q[..., 1]
+        packed[..., 6] = source.Sigma[..., 0, 0]
+        packed[..., 7] = source.Sigma[..., 0, 1]
+        packed[..., 8] = source.Sigma[..., 1, 1]
+        packed[..., 9] = source.S[..., 0, 0]
+        packed[..., 10] = source.S[..., 0, 1]
+        packed[..., 11] = source.S[..., 1, 1]
+        packed[..., 12] = source.M[..., 0, 0, 0]
+        packed[..., 13] = source.M[..., 0, 0, 1]
+        packed[..., 14] = source.M[..., 0, 1, 1]
+        packed[..., 15] = source.M[..., 1, 1, 1]
+        packed[..., 16] = source.N
+        if not np.isfinite(packed).all():
+            raise FloatingPointError("Rana nonlinear source history contains NaN or infinity")
+        return packed
+
+    def _refresh_source_history(self, fields: GuEmersonFields) -> None:
+        current = self._nonlinear_sources(self._physical(fields))
+        if self._source_history is None:
+            self._source_history = np.zeros_like(current)
+        for stage in ("g", "h", "omega", "gamma", "chi"):
+            slots = FIELD_SLOTS[stage]
+            alpha = RANA_SOURCE_HISTORY_RELAXATION[stage]
+            self._source_history[..., list(slots)] = (
+                alpha * current[..., list(slots)]
+                + (1.0 - alpha) * self._source_history[..., list(slots)]
+            )
+
     def _bulk_stage_residual(self, fields: GuEmersonFields, slots: tuple[int, ...]) -> np.ndarray:
         state = self._physical(fields)
         mu = self.problem.case.mu(state[..., 3])
         raw = self.problem._bulk(state, mu)
         self.residual_evaluations += 1
+        if any(slot >= 4 for slot in slots):
+            if self._source_history is None:
+                raise RuntimeError("nonlinear source history was not initialized")
+            # ``steady_r26_bulk_residual`` stores every balance as LHS - RHS.
+            # Replacing -S(current) by -S(history) therefore adds the difference
+            # S(current)-S(history).  During numerical matrix construction this
+            # cancellation keeps the nonlinear source explicit, while the
+            # collision and diffusion derivatives remain on the implicit block.
+            current_source = self._nonlinear_sources(state)
+            raw[..., 4:] += current_source[..., 4:] - self._source_history[..., 4:]
         return (
             raw[1:-1, 1:-1][..., list(slots)]
             / self.problem.case.scaling.bulk[list(slots)]
@@ -342,6 +433,7 @@ class _SegregatedReconstructionOperators:
         return with_vector(updated)
 
     def solve_velocity(self, fields: GuEmersonFields) -> GuEmersonFields:
+        self._refresh_source_history(fields)
         if self.completed_sweeps % self.options.matrix_refresh_interval == 0:
             self._block_matrices.clear()
             self._block_factors.clear()

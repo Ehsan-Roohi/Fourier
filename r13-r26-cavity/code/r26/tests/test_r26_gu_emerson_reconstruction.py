@@ -10,6 +10,7 @@ from r26_cases import gu_asme2009_cavity_case
 from r26_gu_emerson_algorithm import GU_EMERSON_STAGE_ORDER
 from r26_gu_emerson_reconstruction import (
     FIELD_SLOTS,
+    RANA_SOURCE_HISTORY_RELAXATION,
     GuEmersonReconstructionOptions,
     make_gu_emerson_reconstruction_problem,
     solve_gu_emerson_reconstruction,
@@ -24,10 +25,17 @@ def test_reconstruction_controls_are_complete_and_explicitly_nonpaper() -> None:
     assert set(FIELD_SLOTS) == {
         "velocity", "temperature", "g", "h", "omega", "gamma", "chi"
     }
-    assert all(
-        "not specified by Gu--Emerson" in item.provenance
-        for item in (disclosure.controls or {}).values()
-    )
+    controls = disclosure.controls or {}
+    assert "not specified by Gu--Emerson" in controls["linear_solver"].provenance
+    assert "not specified by Gu--Emerson" in controls["under_relaxation_factors"].provenance
+    assert "d92e0142776d90499e2beea4a8b3b37b590597f66b61f43bb49f58ade73a884b" in controls["source_term_linearisation"].provenance
+    assert RANA_SOURCE_HISTORY_RELAXATION == {
+        "g": 1.0e-2,
+        "h": 1.0e-2,
+        "omega": 5.0e-1,
+        "gamma": 5.0e-1,
+        "chi": 1.0e-1,
+    }
 
 
 def test_zero_lid_equilibrium_survives_one_complete_published_order_sweep() -> None:
@@ -147,3 +155,29 @@ def test_standalone_perturbed_start_is_deterministic_positive_and_mass_safe() ->
     assert evidence["velocity_linear_relative_tolerance"] == 1.0e-6
     assert evidence["user_scalar_linear_relative_tolerance"] == 1.0e-5
     assert evidence["custom_under_relaxation_factors_declared_in_source"] is False
+    assert evidence["nonlinear_source_history_declared_in_cs_user_modules"] is True
+    assert evidence["cs_user_modules_sha256"] == "d92e0142776d90499e2beea4a8b3b37b590597f66b61f43bb49f58ade73a884b"
+
+
+def test_source_linearized_n16_resume_is_bounded_source_locked_and_fail_closed() -> None:
+    root = Path(__file__).resolve().parents[1]
+    runner = (root / "analysis" / "run_r26_gu_emerson_source_linearized_n16_resume.py").read_text()
+    validator = (root / "tools" / "validate_r26_gu_emerson_source_linearized_n16_resume.py").read_text()
+    slurm = (root / "hpc" / "r26_gu_emerson_source_linearized_n16_resume.slurm").read_text()
+    submit = (root / "hpc" / "submit_r26_gu_emerson_source_linearized_n16_resume.sh").read_text()
+    reconstruction = (root / "r26_gu_emerson_reconstruction.py").read_text()
+    for factor in ("1.0e-2", "5.0e-1", "1.0e-1"):
+        assert factor in reconstruction
+    assert "matrix_refresh_interval=1" in runner
+    assert "MAX_OUTER_ITERATIONS = 720" in runner
+    assert '"reused_failed_n16_state": False' in runner
+    assert "latest_checkpoint.npz" not in runner
+    assert "state_sha256(state)" in runner
+    assert "problem.evaluate(state)" in validator
+    assert "run_tests.py" in slurm
+    assert "checkout --detach FETCH_HEAD" in slurm
+    assert "R26_GE_FAILED_STANDALONE_DIR" in submit
+    assert "raw.githubusercontent.com" in submit
+    for key in ("production_accepted", "n28_authorized", "n29_authorized", "n30_authorized"):
+        assert f'"{key}": False' in runner
+        assert f'"{key}": False' in validator
