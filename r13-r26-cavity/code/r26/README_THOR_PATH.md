@@ -105,3 +105,24 @@ the two accepted N8 states, and ignores every failed N16 checkpoint.
 The resume remains a validation gate.  N24 is authorized only when both N16
 paths pass the complete raw physical residual and agree within the declared
 root tolerance; N28, N29, N30 and production acceptance remain blocked.
+
+Job 63725331 showed that this transferred source-history split does not cure
+the N16 instability: the SIMPLE density correction became non-positive after
+five sweeps.  That failed N16 state is not reusable.
+
+## Momentum-diagonal SIMPLE N16 resume
+
+The next bounded gate corrects a narrower reconstruction error in the SIMPLE
+step.  Gu--Emerson Sec. 5.2 prescribes a velocity solve followed immediately
+by the SIMPLE pressure correction.  Accordingly, the pressure-correction and
+velocity-correction coefficients now use the component-wise diagonal of that
+same under-relaxed velocity block, `alpha_u/a_P`.  The full SIMPLE velocity
+correction is applied; the fixed pressure under-relaxation is applied only to
+the pressure update.  The earlier diffusion-only surrogate is not reused.
+
+The transferred Rana nonlinear-source history is disabled in this gate
+because it is not part of the printed Gu--Emerson algorithm and the preceding
+source-linearized run already falsified it for N16.  Both accepted N8 roots are
+independently revalidated and interpolated, while all failed N16 iterates are
+excluded.  N24 is authorized only if both N16 paths pass the independent raw
+gate and agree; N28, N29, N30 and production acceptance remain blocked.

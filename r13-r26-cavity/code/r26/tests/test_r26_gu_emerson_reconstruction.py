@@ -12,9 +12,11 @@ from r26_gu_emerson_reconstruction import (
     FIELD_SLOTS,
     RANA_SOURCE_HISTORY_RELAXATION,
     GuEmersonReconstructionOptions,
+    _SegregatedReconstructionOperators,
     make_gu_emerson_reconstruction_problem,
     solve_gu_emerson_reconstruction,
 )
+from r26_gu_emerson_variables import gu_emerson_fields_from_state
 
 
 def test_reconstruction_controls_are_complete_and_explicitly_nonpaper() -> None:
@@ -54,6 +56,40 @@ def test_zero_lid_equilibrium_survives_one_complete_published_order_sweep() -> N
     assert result.records[0].stage_order == GU_EMERSON_STAGE_ORDER
     assert result.records[0].raw_gate < 1.0e-12
     assert result.block_factorizations == 0
+
+
+def test_simple_uses_the_underrelaxed_velocity_block_diagonal() -> None:
+    case = replace(
+        gu_asme2009_cavity_case(5, kn=0.1, lid_speed_m_per_s=10.0),
+        lid_velocity=0.0,
+    )
+    state = case.equilibrium_state()
+    state[2, 2, 1] = 1.0e-3
+    problem = make_gu_emerson_reconstruction_problem(case)
+    options = GuEmersonReconstructionOptions(
+        max_outer_iterations=1,
+        matrix_refresh_interval=1,
+        use_rana_source_history=False,
+    )
+    fields = gu_emerson_fields_from_state(
+        state, x=case.x, y=case.y, mu=case.mu(state[..., 3])
+    )
+    operators = _SegregatedReconstructionOperators(problem, options)
+    provisional = operators.solve_velocity(fields)
+    matrix = operators._block_matrices["velocity"]
+    raw_diagonal = matrix.diagonal().reshape(3, 3, 2)
+    coefficients = operators._simple_inverse_momentum_diagonal
+    assert coefficients is not None
+    d_x, d_y = coefficients
+    np.testing.assert_allclose(
+        d_x[1:-1, 1:-1], options.velocity_relaxation / raw_diagonal[..., 0]
+    )
+    np.testing.assert_allclose(
+        d_y[1:-1, 1:-1], options.velocity_relaxation / raw_diagonal[..., 1]
+    )
+    corrected = operators.simple_pressure_correction(provisional)
+    assert np.isfinite(corrected.rho).all()
+    assert np.min(corrected.rho) > 0.0
 
 
 def test_reconstruction_callback_observes_each_accepted_sweep_state() -> None:
@@ -173,10 +209,50 @@ def test_source_linearized_n16_resume_is_bounded_source_locked_and_fail_closed()
     assert '"reused_failed_n16_state": False' in runner
     assert "latest_checkpoint.npz" not in runner
     assert "state_sha256(state)" in runner
+    assert "json.dumps(jsonable(record)" in runner
     assert "problem.evaluate(state)" in validator
     assert "run_tests.py" in slurm
     assert "checkout --detach FETCH_HEAD" in slurm
     assert "R26_GE_FAILED_STANDALONE_DIR" in submit
+    assert "raw.githubusercontent.com" in submit
+    for key in ("production_accepted", "n28_authorized", "n29_authorized", "n30_authorized"):
+        assert f'"{key}": False' in runner
+        assert f'"{key}": False' in validator
+
+
+def test_momentum_simple_n16_resume_is_source_locked_bounded_and_fail_closed() -> None:
+    root = Path(__file__).resolve().parents[1]
+    runner = (
+        root / "analysis" / "run_r26_gu_emerson_momentum_simple_n16_resume.py"
+    ).read_text()
+    validator = (
+        root / "tools" / "validate_r26_gu_emerson_momentum_simple_n16_resume.py"
+    ).read_text()
+    slurm = (
+        root / "hpc" / "r26_gu_emerson_momentum_simple_n16_resume.slurm"
+    ).read_text()
+    submit = (
+        root / "hpc" / "submit_r26_gu_emerson_momentum_simple_n16_resume.sh"
+    ).read_text()
+    assert "563442d5ce7976b63d82c9592efd6ec3ef620830" in runner
+    assert "MAX_OUTER_ITERATIONS = 720" in runner
+    assert "use_rana_source_history=False" in runner
+    assert '"reused_failed_n16_state": False' in runner
+    assert "json.dumps(jsonable(record)" in runner
+    assert "latest_checkpoint.npz" not in runner
+    for path in (
+        "N16_MOMENTUM_SIMPLE_FROM_N8_EQUILIBRIUM",
+        "N16_MOMENTUM_SIMPLE_FROM_N8_PERTURBED",
+    ):
+        assert path in runner
+        assert path in validator
+    assert "problem.evaluate(state)" in validator
+    assert "use_rana_source_history=False" in validator
+    assert "run_tests.py" in slurm
+    assert "checkout --detach FETCH_HEAD" in slurm
+    assert "validate_r26_gu_emerson_momentum_simple_n16_resume.py" in slurm
+    assert "R26_GE_FAILED_STANDALONE_DIR" in submit
+    assert "R26_GE_FAILED_SOURCE16_DIR" in submit
     assert "raw.githubusercontent.com" in submit
     for key in ("production_accepted", "n28_authorized", "n29_authorized", "n30_authorized"):
         assert f'"{key}": False' in runner

@@ -149,7 +149,7 @@ def _row_scales(problem: R26NodeBVP) -> np.ndarray:
 
 def _pressure_correction_matrix(
     rho: np.ndarray,
-    d_cell: np.ndarray,
+    d_cell: np.ndarray | tuple[np.ndarray, np.ndarray],
     x: np.ndarray,
     y: np.ndarray,
 ) -> tuple[csc_matrix, np.ndarray]:
@@ -157,10 +157,32 @@ def _pressure_correction_matrix(
 
     The operator is assembled in integrated finite-volume form, so every
     interior face contributes an equal and opposite coefficient to its two
-    neighbouring control volumes.  Physical-wall flux is exactly zero.
+    neighbouring control volumes.  Physical-wall flux is exactly zero.  A
+    scalar cell coefficient preserves the historical isotropic preconditioner;
+    a ``(d_x, d_y)`` pair supplies the component-wise momentum coefficients
+    required by a segregated SIMPLE solve.
     """
 
     ny, nx = rho.shape
+    if isinstance(d_cell, tuple):
+        if len(d_cell) != 2:
+            raise ValueError("anisotropic SIMPLE coefficients require (d_x, d_y)")
+        d_x = np.asarray(d_cell[0], dtype=float)
+        d_y = np.asarray(d_cell[1], dtype=float)
+    else:
+        d_x = np.asarray(d_cell, dtype=float)
+        d_y = d_x
+    if (
+        d_x.shape != rho.shape
+        or d_y.shape != rho.shape
+        or not np.isfinite(d_x).all()
+        or not np.isfinite(d_y).all()
+        or np.any(d_x <= 0.0)
+        or np.any(d_y <= 0.0)
+    ):
+        raise FloatingPointError(
+            "SIMPLE inverse momentum diagonals must match rho and be finite positive"
+        )
     ni = nx - 2
     nj = ny - 2
     count = ni * nj
@@ -183,8 +205,8 @@ def _pressure_correction_matrix(
             west = index(j, i)
             east = index(j, i + 1)
             conductivity = 0.5 * (
-                rho[gj, gi] * d_cell[gj, gi]
-                + rho[gj, gi + 1] * d_cell[gj, gi + 1]
+                rho[gj, gi] * d_x[gj, gi]
+                + rho[gj, gi + 1] * d_x[gj, gi + 1]
             )
             coefficient = conductivity * dy[j] / (x[gi + 1] - x[gi])
             diagonal[west] += coefficient
@@ -200,8 +222,8 @@ def _pressure_correction_matrix(
             south = index(j, i)
             north = index(j + 1, i)
             conductivity = 0.5 * (
-                rho[gj, gi] * d_cell[gj, gi]
-                + rho[gj + 1, gi] * d_cell[gj + 1, gi]
+                rho[gj, gi] * d_y[gj, gi]
+                + rho[gj + 1, gi] * d_y[gj + 1, gi]
             )
             coefficient = conductivity * dx[i] / (y[gj + 1] - y[gj])
             diagonal[south] += coefficient

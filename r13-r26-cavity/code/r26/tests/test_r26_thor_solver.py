@@ -8,6 +8,7 @@ from r26_solver import LogStateTransform
 from r26_thor_solver import (
     SimpleR26Preconditioner,
     ThorSolveOptions,
+    _pressure_correction_matrix,
     make_thor_problem,
     solve_r26_thor_bvp,
 )
@@ -70,6 +71,20 @@ def test_simple_preconditioner_honours_the_independent_mass_rhs() -> None:
         rtol=0.0,
         atol=2.0e-14,
     )
+
+
+def test_pressure_correction_matrix_accepts_component_momentum_diagonals() -> None:
+    coordinate = np.linspace(0.0, 1.0, 5)
+    rho = np.ones((5, 5))
+    isotropic = np.full((5, 5), 0.25)
+    scalar_matrix, scalar_volume = _pressure_correction_matrix(
+        rho, isotropic, coordinate, coordinate
+    )
+    pair_matrix, pair_volume = _pressure_correction_matrix(
+        rho, (isotropic.copy(), isotropic.copy()), coordinate, coordinate
+    )
+    np.testing.assert_array_equal(pair_volume, scalar_volume)
+    np.testing.assert_array_equal(pair_matrix.toarray(), scalar_matrix.toarray())
 
 
 def test_stationary_equilibrium_exits_before_building_a_frozen_jacobian() -> None:

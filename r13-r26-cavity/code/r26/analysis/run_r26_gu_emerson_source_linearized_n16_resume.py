@@ -34,6 +34,7 @@ from run_r26_gu_emerson_standalone_ladder import (
     CASE,
     ROOT_ABSOLUTE_TOLERANCE,
     comparison,
+    jsonable,
     run_path,
     write_json,
 )
@@ -281,7 +282,7 @@ def main() -> None:
             exception=exc,
         )
         write_json(args.output / "GU_EMERSON_SOURCE_LINEARIZED_N16_RESUME_FAILED.json", record)
-        print(json.dumps(record, sort_keys=True), flush=True)
+        print(json.dumps(jsonable(record), sort_keys=True), flush=True)
         raise
 
     record = final_record(
@@ -294,7 +295,7 @@ def main() -> None:
         reused_n8=reused_n8,
     )
     write_json(args.output / "GU_EMERSON_SOURCE_LINEARIZED_N16_RESUME_PASSED.json", record)
-    print(json.dumps(record, sort_keys=True), flush=True)
+    print(json.dumps(jsonable(record), sort_keys=True), flush=True)
 
 
 if __name__ == "__main__":

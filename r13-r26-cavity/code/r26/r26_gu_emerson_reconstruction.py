@@ -37,7 +37,6 @@ from r26_bulk_equations import (
 from r26_cases import CavityCase
 from r26_discretization import R26NodeBVP, linear_wall_extrapolation
 from r26_fv_backend import (
-    rhie_chow_inverse_momentum_diagonal,
     thor_fv_bulk_residual,
     wall_bounded_control_volume_weights,
 )
@@ -127,6 +126,7 @@ class GuEmersonReconstructionOptions:
     wall_relaxation: float = 0.25
     wall_tolerance: float = 1.0e-11
     wall_max_evaluations: int = 600
+    use_rana_source_history: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -178,20 +178,26 @@ class GuEmersonReconstructionOptions:
             ),
             "source_term_linearisation": NumericalControlSource(
                 (
-                    "Rana Code_Saturne fixed nonlinear-source history factors "
-                    "g=0.01, h=0.01, omega=0.5, gamma=0.5, chi=0.1; "
-                    "collision/diffusion retained in coloured field matrices "
-                    f"refreshed every {self.matrix_refresh_interval} fixed Picard sweeps"
+                    (
+                        "Rana Code_Saturne fixed nonlinear-source history factors "
+                        "g=0.01, h=0.01, omega=0.5, gamma=0.5, chi=0.1; "
+                        "collision/diffusion retained in coloured field matrices"
+                    )
+                    if self.use_rana_source_history
+                    else "Gu--Emerson field defect with no transferred Rana source history"
                 ),
                 (
-                    "SRCR26_22nd_NOV/cs_user_modules.f90 SHA-256 "
-                    "d92e0142776d90499e2beea4a8b3b37b590597f66b61f43bb49f58ade73a884b; "
-                    "matrix construction remains a documented local reconstruction"
+                    (
+                        "SRCR26_22nd_NOV/cs_user_modules.f90 SHA-256 "
+                        "d92e0142776d90499e2beea4a8b3b37b590597f66b61f43bb49f58ade73a884b"
+                    )
+                    if self.use_rana_source_history
+                    else "Gu--Emerson JFM 636 (2009), Eqs. (56)--(63) and Sec. 5.2"
                 ),
             ),
             "rhie_chow_face_coefficient": NumericalControlSource(
-                "inverse central-diffusion momentum diagonal from r26_fv_backend",
-                tag,
+                "component-wise inverse diagonal of the velocity block solved immediately before SIMPLE",
+                "Patankar SIMPLE as required by Gu--Emerson JFM 636 (2009), Sec. 5.2",
             ),
             "sharp_corner_treatment": NumericalControlSource(
                 "explicit bilinear adjacent-face extension; corners excluded from wall metrics",
@@ -290,6 +296,7 @@ class _SegregatedReconstructionOperators:
         self._block_matrices: dict[str, csc_matrix] = {}
         self._block_factors: dict[str, object | None] = {}
         self._source_history: np.ndarray | None = None
+        self._simple_inverse_momentum_diagonal: tuple[np.ndarray, np.ndarray] | None = None
         self.completed_sweeps = 0
 
     def _physical(self, fields: GuEmersonFields) -> np.ndarray:
@@ -341,6 +348,9 @@ class _SegregatedReconstructionOperators:
         return packed
 
     def _refresh_source_history(self, fields: GuEmersonFields) -> None:
+        if not self.options.use_rana_source_history:
+            self._source_history = None
+            return
         current = self._nonlinear_sources(self._physical(fields))
         if self._source_history is None:
             self._source_history = np.zeros_like(current)
@@ -357,7 +367,7 @@ class _SegregatedReconstructionOperators:
         mu = self.problem.case.mu(state[..., 3])
         raw = self.problem._bulk(state, mu)
         self.residual_evaluations += 1
-        if any(slot >= 4 for slot in slots):
+        if self.options.use_rana_source_history and any(slot >= 4 for slot in slots):
             if self._source_history is None:
                 raise RuntimeError("nonlinear source history was not initialized")
             # ``steady_r26_bulk_residual`` stores every balance as LHS - RHS.
@@ -437,7 +447,38 @@ class _SegregatedReconstructionOperators:
         if self.completed_sweeps % self.options.matrix_refresh_interval == 0:
             self._block_matrices.clear()
             self._block_factors.clear()
-        return self._solve_field(fields, "velocity")
+        updated = self._solve_field(fields, "velocity")
+        matrix = self._block_matrices.get("velocity")
+        if matrix is None:
+            self._simple_inverse_momentum_diagonal = None
+        else:
+            side = self.problem.case.nodes - 2
+            raw_diagonal = matrix.diagonal().reshape(side, side, 2)
+            raw_diagonal = raw_diagonal * self.problem.case.scaling.bulk[1:3]
+            if not np.isfinite(raw_diagonal).all() or np.any(raw_diagonal <= 0.0):
+                raise FloatingPointError(
+                    "velocity block has a non-positive SIMPLE momentum diagonal"
+                )
+            # The velocity stage applies fixed under-relaxation to its linear
+            # correction, so the SIMPLE coefficient is alpha_u/a_P rather
+            # than 1/a_P.  This is the same under-relaxed momentum equation
+            # that produced the provisional velocity.
+            inverse = self.options.velocity_relaxation / raw_diagonal
+            d_x = np.empty_like(fields.rho)
+            d_y = np.empty_like(fields.rho)
+            d_x[1:-1, 1:-1] = inverse[..., 0]
+            d_y[1:-1, 1:-1] = inverse[..., 1]
+            for coefficient in (d_x, d_y):
+                coefficient[0, 1:-1] = coefficient[1, 1:-1]
+                coefficient[-1, 1:-1] = coefficient[-2, 1:-1]
+                coefficient[1:-1, 0] = coefficient[1:-1, 1]
+                coefficient[1:-1, -1] = coefficient[1:-1, -2]
+                coefficient[0, 0] = coefficient[1, 1]
+                coefficient[0, -1] = coefficient[1, -2]
+                coefficient[-1, 0] = coefficient[-2, 1]
+                coefficient[-1, -1] = coefficient[-2, -2]
+            self._simple_inverse_momentum_diagonal = (d_x, d_y)
+        return updated
 
     def simple_pressure_correction(self, fields: GuEmersonFields) -> GuEmersonFields:
         self.executed_stages.append("simple_pressure_correction")
@@ -446,9 +487,15 @@ class _SegregatedReconstructionOperators:
         mu = case.mu(state[..., 3])
         continuity = self.problem._bulk(state, mu)[..., 0]
         self.residual_evaluations += 1
-        d_cell = rhie_chow_inverse_momentum_diagonal(mu, case.x, case.y)
+        if np.max(np.abs(continuity[1:-1, 1:-1]), initial=0.0) == 0.0:
+            return fields
+        if self._simple_inverse_momentum_diagonal is None:
+            raise RuntimeError(
+                "SIMPLE requires the diagonal of the velocity equation solved in stage (i)"
+            )
+        d_x, d_y = self._simple_inverse_momentum_diagonal
         matrix, volumes = _pressure_correction_matrix(
-            state[..., 0], d_cell, case.x, case.y
+            state[..., 0], (d_x, d_y), case.x, case.y
         )
         rhs = np.concatenate(((-continuity[1:-1, 1:-1] * volumes).ravel(), (0.0,)))
         pressure_inner = splu(matrix).solve(rhs)[:-1].reshape(volumes.shape)
@@ -464,10 +511,13 @@ class _SegregatedReconstructionOperators:
         pressure[-1, -1] = pressure[-2, -2]
         grad_x = np.gradient(pressure, case.x, axis=1, edge_order=2)
         grad_y = np.gradient(pressure, case.y, axis=0, edge_order=2)
-        alpha = self.options.pressure_relaxation
         velocity = np.asarray(fields.velocity).copy()
-        velocity[1:-1, 1:-1, 0] -= alpha * d_cell[1:-1, 1:-1] * grad_x[1:-1, 1:-1]
-        velocity[1:-1, 1:-1, 1] -= alpha * d_cell[1:-1, 1:-1] * grad_y[1:-1, 1:-1]
+        # Canonical SIMPLE applies the full velocity correction obtained from
+        # the pressure-correction equation.  Pressure under-relaxation applies
+        # to the pressure update, not to this flux correction.
+        velocity[1:-1, 1:-1, 0] -= d_x[1:-1, 1:-1] * grad_x[1:-1, 1:-1]
+        velocity[1:-1, 1:-1, 1] -= d_y[1:-1, 1:-1] * grad_y[1:-1, 1:-1]
+        alpha = self.options.pressure_relaxation
         rho = np.asarray(fields.rho).copy()
         rho[1:-1, 1:-1] += alpha * pressure_inner / fields.theta[1:-1, 1:-1]
         interior_weights = self.problem.mass_weights[1:-1, 1:-1]
