@@ -23,7 +23,7 @@ mass, and positivity.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Final
+from typing import Callable, Final
 
 import numpy as np
 from scipy.optimize._numdiff import approx_derivative
@@ -538,6 +538,7 @@ def solve_gu_emerson_reconstruction(
     initial_state: np.ndarray,
     *,
     options: GuEmersonReconstructionOptions | None = None,
+    record_callback: Callable[[GuEmersonSweepRecord, np.ndarray], None] | None = None,
 ) -> GuEmersonReconstructionResult:
     """Run bounded published-order sweeps and enforce the complete raw gate."""
 
@@ -570,18 +571,19 @@ def solve_gu_emerson_reconstruction(
         fields = sweep.fields
         state = sweep.physical_state
         raw, diagnostics, positive = _gate(problem, state)
-        records.append(
-            GuEmersonSweepRecord(
-                outer_iteration=outer,
-                raw_gate=raw,
-                scaled_linf=diagnostics.total_linf,
-                held_continuity=diagnostics.held_out_continuity,
-                mass_error=diagnostics.mass_error,
-                min_density=diagnostics.min_density,
-                min_temperature=diagnostics.min_temperature,
-                stage_order=tuple(operators.executed_stages),
-            )
+        record = GuEmersonSweepRecord(
+            outer_iteration=outer,
+            raw_gate=raw,
+            scaled_linf=diagnostics.total_linf,
+            held_continuity=diagnostics.held_out_continuity,
+            mass_error=diagnostics.mass_error,
+            min_density=diagnostics.min_density,
+            min_temperature=diagnostics.min_temperature,
+            stage_order=tuple(operators.executed_stages),
         )
+        records.append(record)
+        if record_callback is not None:
+            record_callback(record, state)
         converged = bool(
             positive
             and raw <= options.raw_tolerance
