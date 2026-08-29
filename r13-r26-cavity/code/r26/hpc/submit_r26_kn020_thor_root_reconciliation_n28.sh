@@ -13,6 +13,37 @@ set -euo pipefail
   exit 2
 }
 
+require_file() {
+  local path="$1"
+  test -f "$path" || {
+    echo "required input is missing: $path" >&2
+    return 2
+  }
+}
+
+verify_root() {
+  local path="$1"
+  local expected="$2"
+  local actual
+  require_file "$path"
+  actual="$(sha256sum "$path")"
+  actual="${actual%% *}"
+  test "$actual" = "$expected" || {
+    echo "immutable root hash mismatch: $path" >&2
+    return 2
+  }
+}
+
+require_file "$R26_THOR_N24_DIR/THOR_CROSS_SOLVER_N24_PASSED.json"
+require_file "$R26_THOR_N24_DIR/N8_N16_N24_GRID_SENSITIVITY.json"
+for directory in "$R26_LEGACY_N25_DIR" "$R26_LEGACY_N27_DIR" "$R26_LEGACY_N28_DIR"; do
+  require_file "$directory/run_summary.json"
+done
+verify_root "$R26_THOR_N24_DIR/N24/thor_state.npz" "94924cbf73d367418f32042f25e80fe1fc5d84aa572672776ef1728ed612d411"
+verify_root "$R26_LEGACY_N25_DIR/last_accepted_state.npz" "1ab75d87bc21f37d5658d8c2d728eb909ce758bada0f205287beb7d6f2f18a13"
+verify_root "$R26_LEGACY_N27_DIR/last_accepted_state.npz" "b64fcadcf8e7c0e17e1f07df348f5cf619f152662ff606024e11404c79010905"
+verify_root "$R26_LEGACY_N28_DIR/last_accepted_state.npz" "a28951fed0063f66dac5e0ec481a108f9a4599fdcfd83d6865b2a160ffa4a409"
+
 R26_THOR_N28_OUT="${R26_THOR_N28_OUT:-/project/pi_roohie_umass_edu/CavityColdToHotIdentify/R26_THOR_ROOT_RECONCILIATION_N28_$(date +%Y%m%d_%H%M%S)}"
 test ! -e "$R26_THOR_N28_OUT"
 test ! -e "${R26_THOR_N28_OUT}_RESULTS.zip"
