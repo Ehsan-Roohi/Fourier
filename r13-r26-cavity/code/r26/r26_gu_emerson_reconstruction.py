@@ -23,7 +23,7 @@ mass, and positivity.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Callable, Final
+from typing import Callable, Final, Literal
 
 import numpy as np
 from scipy.optimize._numdiff import approx_derivative
@@ -37,7 +37,9 @@ from r26_bulk_equations import (
 from r26_cases import CavityCase
 from r26_discretization import R26NodeBVP, linear_wall_extrapolation
 from r26_fv_backend import (
+    impermeable_wall_mass_divergence,
     thor_fv_bulk_residual,
+    wall_bounded_face_divergence,
     wall_bounded_control_volume_weights,
 )
 from r26_gu_emerson_algorithm import (
@@ -102,6 +104,23 @@ RANA_SOURCE_HISTORY_RELAXATION: Final[dict[str, float]] = {
     "chi": 1.0e-1,
 }
 
+# Code_Saturne 5.0.3 owns pressure as an independent variable.  Its steady
+# defaults use relxst=0.7 for transported variables and 1-relxst=0.3 for
+# pressure (``iniini.f90`` and ``modini.f90`` at tag v5.0.3).  The supplied
+# Rana physical-properties routine then updates density at the beginning of a
+# time step from total pressure and temperature with the fixed history factor
+# below.  It is not a SIMPLE pressure relaxation and must not be applied to
+# the pressure increment itself.
+CODE_SATURNE_V5_COMMIT: Final[str] = "e17068ce692ad2d90c694d375b7c098043b16969"
+CODE_SATURNE_V5_STEADY_FIELD_RELAXATION: Final[float] = 7.0e-1
+CODE_SATURNE_V5_STEADY_PRESSURE_RELAXATION: Final[float] = 3.0e-1
+RANA_THERMOPHYSICAL_HISTORY_RELAXATION: Final[float] = 2.0e-4
+
+PressureDensityCoupling = Literal[
+    "legacy_direct_mass_constrained",
+    "code_saturne_v5_lagged_total_pressure_diagnostic",
+]
+
 
 @dataclass(frozen=True)
 class GuEmersonReconstructionOptions:
@@ -127,6 +146,44 @@ class GuEmersonReconstructionOptions:
     wall_tolerance: float = 1.0e-11
     wall_max_evaluations: int = 600
     use_rana_source_history: bool = True
+    pressure_density_coupling: PressureDensityCoupling = (
+        "legacy_direct_mass_constrained"
+    )
+    density_property_relaxation: float = RANA_THERMOPHYSICAL_HISTORY_RELAXATION
+
+    @classmethod
+    def code_saturne_v5_rana_diagnostic(
+        cls, **overrides: object
+    ) -> "GuEmersonReconstructionOptions":
+        """Return a non-authorizing Code_Saturne/Rana carrier diagnostic.
+
+        The pressure/density semantics and steady defaults are visible in the
+        official v5.0.3 core and supplied Rana routines.  Missing historical
+        face coefficients and case files mean this profile is suitable only
+        for mismatch measurement, not production or historical reproduction.
+        """
+
+        values: dict[str, object] = {
+            "matrix_refresh_interval": 1,
+            "velocity_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "pressure_relaxation": CODE_SATURNE_V5_STEADY_PRESSURE_RELAXATION,
+            "temperature_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "g_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "h_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "omega_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "gamma_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "chi_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "wall_relaxation": 1.0,
+            "use_rana_source_history": True,
+            "pressure_density_coupling": (
+                "code_saturne_v5_lagged_total_pressure_diagnostic"
+            ),
+            "density_property_relaxation": (
+                RANA_THERMOPHYSICAL_HISTORY_RELAXATION
+            ),
+        }
+        values.update(overrides)
+        return cls(**values)
 
     def __post_init__(self) -> None:
         if (
@@ -147,6 +204,16 @@ class GuEmersonReconstructionOptions:
         )
         if not all(np.isfinite(value) and value > 0.0 for value in positive):
             raise ValueError("all tolerances and the FD step must be finite and positive")
+        if self.pressure_density_coupling not in (
+            "legacy_direct_mass_constrained",
+            "code_saturne_v5_lagged_total_pressure_diagnostic",
+        ):
+            raise ValueError("unknown pressure-density coupling")
+        if not (
+            np.isfinite(self.density_property_relaxation)
+            and 0.0 < self.density_property_relaxation <= 1.0
+        ):
+            raise ValueError("density property relaxation must lie in (0,1]")
         relaxations = tuple(self.relaxation(name) for name in FIELD_SLOTS) + (
             self.pressure_relaxation,
             self.wall_relaxation,
@@ -161,6 +228,19 @@ class GuEmersonReconstructionOptions:
     @property
     def disclosure(self) -> GuEmersonAlgorithmDisclosure:
         tag = "documented local reconstruction; not specified by Gu--Emerson"
+        saturne_carrier = (
+            self.pressure_density_coupling
+            == "code_saturne_v5_lagged_total_pressure_diagnostic"
+        )
+        relaxation_source = (
+            (
+                "Code_Saturne v5.0.3 iniini.f90/modini.f90 at commit "
+                f"{CODE_SATURNE_V5_COMMIT}; Rana physical-properties source "
+                "SHA-256 a01d309692acf26093c65aa4c11453afc07f3f98b7be1bb8f2c1ea7ba2e44d5d"
+            )
+            if saturne_carrier
+            else tag
+        )
         controls = {
             "linear_solver": NumericalControlSource(
                 "SuperLU sparse direct field blocks; LSMR singular-block fallback",
@@ -174,7 +254,7 @@ class GuEmersonReconstructionOptions:
                     f"gamma={self.gamma_relaxation}, chi={self.chi_relaxation}, "
                     f"wall_correction={self.wall_relaxation}"
                 ),
-                tag,
+                relaxation_source,
             ),
             "source_term_linearisation": NumericalControlSource(
                 (
@@ -196,8 +276,19 @@ class GuEmersonReconstructionOptions:
                 ),
             ),
             "rhie_chow_face_coefficient": NumericalControlSource(
-                "component-wise inverse diagonal of the velocity block solved immediately before SIMPLE",
-                "Patankar SIMPLE as required by Gu--Emerson JFM 636 (2009), Sec. 5.2",
+                (
+                    "component-wise inverse diagonal of the velocity block; "
+                    "full velocity/flux correction; pressure retained independently and "
+                    f"rho lagged by {self.density_property_relaxation:g} from p_total/theta"
+                    if saturne_carrier
+                    else "component-wise inverse diagonal of the velocity block solved immediately before SIMPLE"
+                ),
+                (
+                    "Code_Saturne v5.0.3 resopv.f90/navstv.f90 at commit "
+                    f"{CODE_SATURNE_V5_COMMIT}; supplied Rana cs_user_physical_properties_R26.f90"
+                    if saturne_carrier
+                    else "Patankar SIMPLE as required by Gu--Emerson JFM 636 (2009), Sec. 5.2"
+                ),
             ),
             "sharp_corner_treatment": NumericalControlSource(
                 "explicit bilinear adjacent-face extension; corners excluded from wall metrics",
@@ -297,7 +388,46 @@ class _SegregatedReconstructionOperators:
         self._block_factors: dict[str, object | None] = {}
         self._source_history: np.ndarray | None = None
         self._simple_inverse_momentum_diagonal: tuple[np.ndarray, np.ndarray] | None = None
+        self._saturne_total_pressure: np.ndarray | None = None
         self.completed_sweeps = 0
+
+    @property
+    def uses_saturne_carrier(self) -> bool:
+        return (
+            self.options.pressure_density_coupling
+            == "code_saturne_v5_lagged_total_pressure_diagnostic"
+        )
+
+    def _apply_lagged_density_property(
+        self, fields: GuEmersonFields
+    ) -> GuEmersonFields:
+        """Apply the supplied Rana ``rho <- p_total/(R*T)`` history update.
+
+        Code_Saturne calls the physical-properties hook before the flow solve,
+        so a pressure correction produced in one outer iteration affects
+        density at the beginning of the next.  Boundary-node density remains
+        owned by the complete R26 wall solve later in the printed sweep.
+        """
+
+        if not self.uses_saturne_carrier:
+            return fields
+        rho = np.asarray(fields.rho, dtype=float)
+        theta = np.asarray(fields.theta, dtype=float)
+        if self._saturne_total_pressure is None:
+            self._saturne_total_pressure = rho * theta
+            return fields
+        target = self._saturne_total_pressure / theta
+        alpha = self.options.density_property_relaxation
+        updated = rho.copy()
+        updated[1:-1, 1:-1] = (
+            alpha * target[1:-1, 1:-1]
+            + (1.0 - alpha) * rho[1:-1, 1:-1]
+        )
+        if not np.isfinite(updated).all() or np.any(updated <= 0.0):
+            raise FloatingPointError(
+                "Code_Saturne/Rana thermophysical density update produced invalid rho"
+            )
+        return replace(fields, rho=updated)
 
     def _physical(self, fields: GuEmersonFields) -> np.ndarray:
         mu = self.problem.case.mu(fields.theta)
@@ -347,6 +477,68 @@ class _SegregatedReconstructionOperators:
             raise FloatingPointError("Rana nonlinear source history contains NaN or infinity")
         return packed
 
+    @staticmethod
+    def _face_average(field: np.ndarray, axis: int) -> np.ndarray:
+        if axis == 1:
+            return 0.5 * (field[:, 1:] + field[:, :-1])
+        if axis == 0:
+            return 0.5 * (field[1:] + field[:-1])
+        raise ValueError("face axis must be 0 or 1")
+
+    def _saturne_pressure_momentum_correction(
+        self, state: np.ndarray
+    ) -> np.ndarray:
+        """Replace ``grad(rho*theta)`` by the independent carrier pressure."""
+
+        if not self.uses_saturne_carrier or self._saturne_total_pressure is None:
+            return np.zeros(state.shape[:2] + (2,), dtype=float)
+        case = self.problem.case
+        thermodynamic = state[..., 0] * state[..., 3]
+        delta = self._saturne_total_pressure - thermodynamic
+        flux_x = np.zeros((case.nodes, case.nodes - 1, 2), dtype=float)
+        flux_y = np.zeros((case.nodes - 1, case.nodes, 2), dtype=float)
+        flux_x[..., 0] = self._face_average(delta, 1)
+        flux_y[..., 1] = self._face_average(delta, 0)
+        wall_x = np.zeros((case.nodes, case.nodes, 2), dtype=float)
+        wall_y = np.zeros((case.nodes, case.nodes, 2), dtype=float)
+        wall_x[:, 0, 0] = delta[:, 0]
+        wall_x[:, -1, 0] = delta[:, -1]
+        wall_y[0, :, 1] = delta[0, :]
+        wall_y[-1, :, 1] = delta[-1, :]
+        return wall_bounded_face_divergence(
+            flux_x, flux_y, wall_x, wall_y, case.x, case.y
+        )
+
+    def _saturne_predicted_continuity(self, fields: GuEmersonFields) -> np.ndarray:
+        """Return the carrier mass imbalance using its stored pressure and d."""
+
+        if self._saturne_total_pressure is None:
+            raise RuntimeError("Code_Saturne carrier pressure was not initialized")
+        if self._simple_inverse_momentum_diagonal is None:
+            raise RuntimeError("Code_Saturne carrier requires the velocity diagonal")
+        case = self.problem.case
+        rho = np.asarray(fields.rho, dtype=float)
+        velocity = np.asarray(fields.velocity, dtype=float)
+        d_x, d_y = self._simple_inverse_momentum_diagonal
+        pressure = self._saturne_total_pressure
+        grad_x = np.gradient(pressure, case.x, axis=1, edge_order=2)
+        grad_y = np.gradient(pressure, case.y, axis=0, edge_order=2)
+        face_gradient_x = np.diff(pressure, axis=1) / np.diff(case.x)[None, :]
+        face_gradient_y = np.diff(pressure, axis=0) / np.diff(case.y)[:, None]
+        mass_x = (
+            self._face_average(rho, 1) * self._face_average(velocity[..., 0], 1)
+            + self._face_average(rho * d_x, 1)
+            * (self._face_average(grad_x, 1) - face_gradient_x)
+        )
+        mass_y = (
+            self._face_average(rho, 0) * self._face_average(velocity[..., 1], 0)
+            + self._face_average(rho * d_y, 0)
+            * (self._face_average(grad_y, 0) - face_gradient_y)
+        )
+        return impermeable_wall_mass_divergence(
+            mass_x, mass_y, case.x, case.y
+        )
+
     def _refresh_source_history(self, fields: GuEmersonFields) -> None:
         if not self.options.use_rana_source_history:
             self._source_history = None
@@ -367,6 +559,8 @@ class _SegregatedReconstructionOperators:
         mu = self.problem.case.mu(state[..., 3])
         raw = self.problem._bulk(state, mu)
         self.residual_evaluations += 1
+        if self.uses_saturne_carrier and any(slot in (1, 2) for slot in slots):
+            raw[..., 1:3] += self._saturne_pressure_momentum_correction(state)
         if self.options.use_rana_source_history and any(slot >= 4 for slot in slots):
             if self._source_history is None:
                 raise RuntimeError("nonlinear source history was not initialized")
@@ -443,6 +637,7 @@ class _SegregatedReconstructionOperators:
         return with_vector(updated)
 
     def solve_velocity(self, fields: GuEmersonFields) -> GuEmersonFields:
+        fields = self._apply_lagged_density_property(fields)
         self._refresh_source_history(fields)
         if self.completed_sweeps % self.options.matrix_refresh_interval == 0:
             self._block_matrices.clear()
@@ -485,9 +680,20 @@ class _SegregatedReconstructionOperators:
         case = self.problem.case
         state = self._physical(fields)
         mu = case.mu(state[..., 3])
-        continuity = self.problem._bulk(state, mu)[..., 0]
+        physical_continuity = self.problem._bulk(state, mu)[..., 0]
         self.residual_evaluations += 1
-        if np.max(np.abs(continuity[1:-1, 1:-1]), initial=0.0) == 0.0:
+        continuity = physical_continuity
+        if self.uses_saturne_carrier and self._simple_inverse_momentum_diagonal is not None:
+            continuity = self._saturne_predicted_continuity(fields)
+        continuity_linf = float(
+            np.max(np.abs(continuity[1:-1, 1:-1]), initial=0.0)
+        )
+        # Compatible wall-bounded equilibrium telescopes to zero analytically,
+        # but non-dimensional coordinate arithmetic may leave a few ulps.  Do
+        # not manufacture a pressure equation when the preceding velocity
+        # equation was also exactly stationary and therefore has no matrix.
+        roundoff_zero = 64.0 * np.finfo(float).eps
+        if continuity_linf <= roundoff_zero:
             return fields
         if self._simple_inverse_momentum_diagonal is None:
             raise RuntimeError(
@@ -518,6 +724,27 @@ class _SegregatedReconstructionOperators:
         velocity[1:-1, 1:-1, 0] -= d_x[1:-1, 1:-1] * grad_x[1:-1, 1:-1]
         velocity[1:-1, 1:-1, 1] -= d_y[1:-1, 1:-1] * grad_y[1:-1, 1:-1]
         alpha = self.options.pressure_relaxation
+        if self.uses_saturne_carrier:
+            if self._saturne_total_pressure is None:
+                self._saturne_total_pressure = np.asarray(fields.rho) * np.asarray(
+                    fields.theta
+                )
+            # ``resopv`` corrects face fluxes with the complete increment;
+            # ``navstv`` relaxes the stored pressure field separately.  The
+            # augmented pressure system already enforces a zero-volume-mean
+            # increment, matching the closed-domain pressure gauge.
+            self._saturne_total_pressure = (
+                self._saturne_total_pressure + alpha * pressure
+            )
+            if (
+                not np.isfinite(self._saturne_total_pressure).all()
+                or np.any(self._saturne_total_pressure <= 0.0)
+            ):
+                raise FloatingPointError(
+                    "Code_Saturne total-pressure update produced invalid pressure"
+                )
+            return replace(fields, velocity=velocity)
+
         rho = np.asarray(fields.rho).copy()
         rho[1:-1, 1:-1] += alpha * pressure_inner / fields.theta[1:-1, 1:-1]
         interior_weights = self.problem.mass_weights[1:-1, 1:-1]
@@ -755,8 +982,12 @@ def solve_gu_emerson_reconstruction(
 
 
 __all__ = [
+    "CODE_SATURNE_V5_COMMIT",
+    "CODE_SATURNE_V5_STEADY_FIELD_RELAXATION",
+    "CODE_SATURNE_V5_STEADY_PRESSURE_RELAXATION",
     "FIELD_SLOTS",
     "GU_EMERSON_RECONSTRUCTION_PROVENANCE",
+    "RANA_THERMOPHYSICAL_HISTORY_RELAXATION",
     "GuEmersonReconstructionOptions",
     "GuEmersonReconstructionResult",
     "GuEmersonSweepRecord",

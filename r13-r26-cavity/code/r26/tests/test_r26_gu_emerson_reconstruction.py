@@ -9,13 +9,18 @@ import numpy as np
 from r26_cases import gu_asme2009_cavity_case
 from r26_gu_emerson_algorithm import GU_EMERSON_STAGE_ORDER
 from r26_gu_emerson_reconstruction import (
+    CODE_SATURNE_V5_COMMIT,
+    CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+    CODE_SATURNE_V5_STEADY_PRESSURE_RELAXATION,
     FIELD_SLOTS,
     RANA_SOURCE_HISTORY_RELAXATION,
+    RANA_THERMOPHYSICAL_HISTORY_RELAXATION,
     GuEmersonReconstructionOptions,
     _SegregatedReconstructionOperators,
     make_gu_emerson_reconstruction_problem,
     solve_gu_emerson_reconstruction,
 )
+from r26_gu_emerson_saturne_contract import saturne_carrier_evidence
 from r26_gu_emerson_variables import gu_emerson_fields_from_state
 
 
@@ -58,6 +63,25 @@ def test_zero_lid_equilibrium_survives_one_complete_published_order_sweep() -> N
     assert result.block_factorizations == 0
 
 
+def test_saturne_profile_starts_nonzero_lid_equilibrium_without_false_simple_matrix() -> None:
+    case = gu_asme2009_cavity_case(
+        5, kn=0.1, lid_speed_m_per_s=10.0,
+        wall_temperature_K=273.0, grid_stretch_beta=0.0,
+    )
+    problem = make_gu_emerson_reconstruction_problem(case)
+    result = solve_gu_emerson_reconstruction(
+        problem,
+        case.equilibrium_state(),
+        options=GuEmersonReconstructionOptions.code_saturne_v5_rana_diagnostic(
+            max_outer_iterations=1
+        ),
+    )
+    assert result.outer_iterations == 1
+    assert result.records[0].stage_order == GU_EMERSON_STAGE_ORDER
+    assert result.records[0].min_density > 0.0
+    assert result.records[0].min_temperature > 0.0
+
+
 def test_simple_uses_the_underrelaxed_velocity_block_diagonal() -> None:
     case = replace(
         gu_asme2009_cavity_case(5, kn=0.1, lid_speed_m_per_s=10.0),
@@ -90,6 +114,99 @@ def test_simple_uses_the_underrelaxed_velocity_block_diagonal() -> None:
     corrected = operators.simple_pressure_correction(provisional)
     assert np.isfinite(corrected.rho).all()
     assert np.min(corrected.rho) > 0.0
+
+
+def test_code_saturne_diagnostic_declares_source_backed_carrier_defaults() -> None:
+    options = GuEmersonReconstructionOptions.code_saturne_v5_rana_diagnostic(
+        max_outer_iterations=1
+    )
+    assert CODE_SATURNE_V5_COMMIT == "e17068ce692ad2d90c694d375b7c098043b16969"
+    assert options.velocity_relaxation == CODE_SATURNE_V5_STEADY_FIELD_RELAXATION
+    assert options.pressure_relaxation == CODE_SATURNE_V5_STEADY_PRESSURE_RELAXATION
+    assert options.density_property_relaxation == RANA_THERMOPHYSICAL_HISTORY_RELAXATION
+    assert options.pressure_density_coupling == "code_saturne_v5_lagged_total_pressure_diagnostic"
+    assert options.matrix_refresh_interval == 1
+    assert options.wall_relaxation == 1.0
+    controls = options.disclosure.controls or {}
+    assert CODE_SATURNE_V5_COMMIT in controls["under_relaxation_factors"].provenance
+    assert "p_total/theta" in controls["rhie_chow_face_coefficient"].value
+
+
+def test_code_saturne_pressure_is_independent_and_density_update_is_lagged() -> None:
+    case = replace(
+        gu_asme2009_cavity_case(5, kn=0.1, lid_speed_m_per_s=10.0),
+        lid_velocity=0.0,
+    )
+    state = case.equilibrium_state()
+    state[2, 2, 1] = 1.0e-3
+    problem = make_gu_emerson_reconstruction_problem(case)
+    options = GuEmersonReconstructionOptions.code_saturne_v5_rana_diagnostic(
+        max_outer_iterations=1,
+        use_rana_source_history=False,
+    )
+    fields = gu_emerson_fields_from_state(
+        state, x=case.x, y=case.y, mu=case.mu(state[..., 3])
+    )
+    operators = _SegregatedReconstructionOperators(problem, options)
+    provisional = operators.solve_velocity(fields)
+    rho_before_pressure = np.asarray(provisional.rho).copy()
+    corrected = operators.simple_pressure_correction(provisional)
+    np.testing.assert_array_equal(corrected.rho, rho_before_pressure)
+    assert operators._saturne_total_pressure is not None
+    pressure_after = operators._saturne_total_pressure.copy()
+    lagged = operators._apply_lagged_density_property(corrected)
+    alpha = RANA_THERMOPHYSICAL_HISTORY_RELAXATION
+    expected = rho_before_pressure.copy()
+    expected[1:-1, 1:-1] = (
+        alpha * pressure_after[1:-1, 1:-1] / corrected.theta[1:-1, 1:-1]
+        + (1.0 - alpha) * rho_before_pressure[1:-1, 1:-1]
+    )
+    np.testing.assert_allclose(lagged.rho, expected, rtol=0.0, atol=2.0e-15)
+    np.testing.assert_array_equal(lagged.rho[0], corrected.rho[0])
+    assert np.min(lagged.rho) > 0.0
+
+
+def test_code_saturne_independent_pressure_enters_momentum_and_mass_fluxes() -> None:
+    case = replace(
+        gu_asme2009_cavity_case(5, kn=0.1, lid_speed_m_per_s=10.0),
+        lid_velocity=0.0,
+    )
+    state = case.equilibrium_state()
+    state[2, 2, 1] = 1.0e-3
+    problem = make_gu_emerson_reconstruction_problem(case)
+    options = GuEmersonReconstructionOptions.code_saturne_v5_rana_diagnostic(
+        max_outer_iterations=1, use_rana_source_history=False
+    )
+    fields = gu_emerson_fields_from_state(
+        state, x=case.x, y=case.y, mu=case.mu(state[..., 3])
+    )
+    operators = _SegregatedReconstructionOperators(problem, options)
+    provisional = operators.solve_velocity(fields)
+    assert operators._saturne_total_pressure is not None
+    base_pressure = operators._saturne_total_pressure.copy()
+    xx, yy = np.meshgrid(case.x, case.y)
+    operators._saturne_total_pressure = base_pressure + 2.0e-3 * xx * yy
+    physical = operators._physical(provisional)
+    momentum = operators._saturne_pressure_momentum_correction(physical)
+    assert np.max(np.abs(momentum[1:-1, 1:-1])) > 0.0
+    continuity = operators._saturne_predicted_continuity(provisional)
+    assert np.isfinite(continuity).all()
+    operators._saturne_total_pressure = base_pressure + 7.0e-4
+    constant = operators._saturne_pressure_momentum_correction(physical)
+    np.testing.assert_allclose(constant, 0.0, rtol=0.0, atol=2.0e-14)
+
+
+def test_saturne_contract_fails_closed_for_missing_case_and_high_speed_energy() -> None:
+    evidence = saturne_carrier_evidence()
+    assert evidence["published_cavity_lid_speed_m_s"] == 10.0
+    assert evidence["historical_case_inputs_available"] is False
+    assert evidence["historical_reproduction_authorized"] is False
+    assert evidence["high_speed_authorized"] is False
+    assert set(evidence["missing_historical_inputs"]) == {
+        "setup.xml", "run.cfg", "mesh", "listing/convergence history"
+    }
+    for key in ("n24_authorized", "n28_authorized", "n29_authorized", "n30_authorized"):
+        assert evidence[key] is False
 
 
 def test_reconstruction_callback_observes_each_accepted_sweep_state() -> None:
