@@ -65,6 +65,10 @@ THOR_GATE_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_thor_gate_n8_n16.sh"
 THOR_AUDIT = R26_ROOT / "tools" / "audit_r26_thor_cross_solver.py"
 THOR_N24_SLURM = R26_ROOT / "hpc" / "r26_kn020_thor_cross_solver_n24.slurm"
 THOR_N24_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_thor_cross_solver_n24.sh"
+THOR_ROOT_LADDER_AUDIT = R26_ROOT / "tools" / "audit_r26_thor_root_ladder.py"
+THOR_N28_VALIDATOR = R26_ROOT / "tools" / "validate_r26_thor_n28_cross_solver.py"
+THOR_N28_SLURM = R26_ROOT / "hpc" / "r26_kn020_thor_root_reconciliation_n28.slurm"
+THOR_N28_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_thor_root_reconciliation_n28.sh"
 RANA_SOURCE_AUDITOR = R26_ROOT / "tools" / "audit_rana_code_saturne_sources.py"
 sys.path.insert(0, str(CODE))
 
@@ -177,6 +181,47 @@ class MaxwellContract(unittest.TestCase):
         self.assertTrue(THOR_AUDIT.is_file())
         self.assertTrue(THOR_N24_SLURM.is_file())
         self.assertTrue(THOR_N24_SUBMIT.is_file())
+
+    def test_thor_n28_is_root_locked_conditional_and_fail_closed(self) -> None:
+        script = THOR_N28_SLURM.read_text()
+        submit = THOR_N28_SUBMIT.read_text()
+        auditor = THOR_ROOT_LADDER_AUDIT.read_text()
+        validator = THOR_N28_VALIDATOR.read_text()
+        self.assertIn(
+            'EXPECTED_THOR_N24_REF="c47b43a838a4df2edf3cea4bbf56e67f038bd798"',
+            script,
+        )
+        self.assertIn("audit_r26_thor_root_ladder.py", script)
+        self.assertLess(
+            script.index("audit_r26_thor_root_ladder.py"),
+            script.index("--nodes 28"),
+        )
+        self.assertIn("R26_LEGACY_N25_DIR", script)
+        self.assertIn("R26_LEGACY_N27_DIR", script)
+        self.assertIn("R26_LEGACY_N28_DIR", script)
+        self.assertIn('--initial-state "$R26_THOR_N24_DIR/N24/thor_state.npz"', script)
+        self.assertIn("--maximum-profile-nrms 0.05", script)
+        self.assertIn("--maximum-line-nrms 0.15", script)
+        self.assertIn("--maximum-DG-relative-difference 0.02", script)
+        self.assertIn('"legacy_roots_used_as_solver_seed": False', script)
+        self.assertIn('"n29_authorized": True', script)
+        self.assertIn('"n30_authorized": False', script)
+        self.assertIn('"production_accepted": False', script)
+        self.assertNotIn("--nodes 29", script)
+        self.assertNotIn("--nodes 30", script)
+        self.assertNotIn("arclength", script.lower())
+        self.assertIn("EXPECTED_ROOT_FILE_SHA256", auditor)
+        self.assertIn("independent_root_diagnostics", auditor)
+        self.assertIn("n16_n24_profile_envelope", auditor)
+        self.assertIn('"n28_run_authorized": n28_run_authorized', auditor)
+        self.assertIn("same_grid_cross_solver_passed", validator)
+        self.assertIn('"legacy_n28_used_as_solver_seed": False', validator)
+        self.assertIn("R26_THOR_N28_REF", submit)
+        self.assertIn("bash -n", submit)
+        self.assertTrue(THOR_ROOT_LADDER_AUDIT.is_file())
+        self.assertTrue(THOR_N28_VALIDATOR.is_file())
+        self.assertTrue(THOR_N28_SLURM.is_file())
+        self.assertTrue(THOR_N28_SUBMIT.is_file())
 
     def test_historical_central_momentum_transport_keeps_rhie_chow_faces(self) -> None:
         source = (R26_ROOT / "r26_fv_backend.py").read_text()

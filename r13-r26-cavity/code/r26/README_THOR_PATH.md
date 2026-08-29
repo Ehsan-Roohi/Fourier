@@ -77,6 +77,29 @@ the Rana D/G disagreement below 2%, is one N24 fixed-case solve started from
 the accepted THOR N16 state. N28 and N30 remain unauthorized, and even an
 accepted N24 record keeps `production_accepted=false`.
 
+## Immutable-root reconciliation and conditional N28
+
+The next stage is `r26_kn020_thor_root_reconciliation_n28.slurm`. It does not
+blindly restart a finer-grid solve. Before the N28 driver is called, the job
+byte-locks and independently re-evaluates the accepted THOR N24 and historical
+N25, N27 and N28 roots. The legacy roots must retain the Maxwell/JFM-2009
+source hashes, 100 m/s lid, uniform grid and complete raw, positivity,
+wall-pressure, momentum-balance and internal-energy-balance gates.
+
+Every adjacent root is compared on a common 128-by-128 grid. The profile gate
+is inherited from the immutable observed N16-to-N24 THOR grid-sensitivity
+record rather than chosen after inspecting the new results. The D/G limit is
+the existing 2% cross-solver limit. A missing N27 file, a changed byte hash or
+any rejected root stops the job before a nonlinear N28 evaluation.
+
+Only after this audit passes is one fixed-case THOR N28 solve started from the
+accepted **THOR N24** state. N25/N27/N28 legacy states are audit references and
+are never solver seeds. The resulting THOR N28 state must pass the complete
+physical gate and the unchanged 5% field, 15% line and 2% D/G same-grid
+comparison against the immutable legacy N28 state. A pass authorizes one
+bounded N29 stage; it does not authorize N30 or a production/grid-convergence
+claim.
+
 ## Auditing the supplied Code_Saturne sources
 
 The legacy source ZIP itself is not redistributed. After extracting its R13
