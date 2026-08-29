@@ -69,6 +69,9 @@ THOR_ROOT_LADDER_AUDIT = R26_ROOT / "tools" / "audit_r26_thor_root_ladder.py"
 THOR_N28_VALIDATOR = R26_ROOT / "tools" / "validate_r26_thor_n28_cross_solver.py"
 THOR_N28_SLURM = R26_ROOT / "hpc" / "r26_kn020_thor_root_reconciliation_n28.slurm"
 THOR_N28_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_thor_root_reconciliation_n28.sh"
+THOR_N29_VALIDATOR = R26_ROOT / "tools" / "validate_r26_thor_n29_refinement.py"
+THOR_N29_SLURM = R26_ROOT / "hpc" / "r26_kn020_thor_n29_from_accepted_n28.slurm"
+THOR_N29_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_thor_n29_from_accepted_n28.sh"
 RANA_SOURCE_AUDITOR = R26_ROOT / "tools" / "audit_rana_code_saturne_sources.py"
 sys.path.insert(0, str(CODE))
 
@@ -227,6 +230,52 @@ class MaxwellContract(unittest.TestCase):
         self.assertTrue(THOR_N28_VALIDATOR.is_file())
         self.assertTrue(THOR_N28_SLURM.is_file())
         self.assertTrue(THOR_N28_SUBMIT.is_file())
+
+    def test_thor_n29_uses_only_the_accepted_thor_n28_root(self) -> None:
+        script = THOR_N29_SLURM.read_text()
+        submit = THOR_N29_SUBMIT.read_text()
+        validator = THOR_N29_VALIDATOR.read_text()
+        self.assertIn(
+            'EXPECTED_N28_REF="743e284d89980cbedd188d4127aae133674e054e"',
+            script,
+        )
+        self.assertIn(
+            'EXPECTED_N28_STATE_FILE_SHA256="21cf1a09daa3ef7a7ddca604bc508fa201dc67029fd85b8a41fe32e78947b5b0"',
+            script,
+        )
+        self.assertIn("THOR_ROOT_RECONCILIATION_N28_PASSED.json", script)
+        self.assertIn("THOR_N28_CROSS_SOLVER_VALIDATION.json", script)
+        self.assertIn("validate_r26_thor_n29_refinement.py", script)
+        self.assertLess(script.index("accepted_n28_preflight"), script.index("--nodes 29"))
+        self.assertIn('--initial-state "$N28_STATE"', script)
+        self.assertIn("--nodes 29", script)
+        self.assertIn("--maximum-profile-nrms 0.05", script)
+        self.assertIn("--maximum-line-nrms 0.15", script)
+        self.assertIn("--maximum-DG-relative-difference 0.02", script)
+        self.assertIn('"accepted_thor_n28_used_as_solver_seed": True', script)
+        self.assertIn('"legacy_or_failed_n29_used_as_solver_seed": False', script)
+        self.assertIn('"historical_failed_n30_used_as_solver_seed": False', script)
+        self.assertIn('"n30_authorized": True', script)
+        self.assertIn('"production_accepted": False', script)
+        self.assertNotIn("--nodes 30", script)
+        self.assertNotIn("arclength", script.lower())
+        self.assertNotIn("homotopy", script.lower())
+        self.assertIn("EXPECTED_N28_SOURCE_COMMIT", validator)
+        self.assertIn("EXPECTED_N28_FILE_SHA256", validator)
+        self.assertIn("independent_gate", validator)
+        self.assertIn("structural_rank", validator)
+        self.assertIn("compare_cross_solver_profiles", validator)
+        self.assertIn("same_grid_cross_solver_passed", validator)
+        self.assertIn('"n30_authorized": passed', validator)
+        self.assertIn('"production_accepted": False', validator)
+        self.assertIn("R26_THOR_ACCEPTED_N28_DIR", submit)
+        self.assertIn("R26_THOR_N29_REF", submit)
+        self.assertIn("verify_file", submit)
+        self.assertIn("bash -n", submit)
+        self.assertLess(submit.index("verify_file"), submit.index("sbatch"))
+        self.assertTrue(THOR_N29_VALIDATOR.is_file())
+        self.assertTrue(THOR_N29_SLURM.is_file())
+        self.assertTrue(THOR_N29_SUBMIT.is_file())
 
     def test_historical_central_momentum_transport_keeps_rhie_chow_faces(self) -> None:
         source = (R26_ROOT / "r26_fv_backend.py").read_text()

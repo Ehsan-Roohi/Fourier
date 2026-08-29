@@ -100,6 +100,24 @@ comparison against the immutable legacy N28 state. A pass authorizes one
 bounded N29 stage; it does not authorize N30 or a production/grid-convergence
 claim.
 
+## Bounded N29 refinement from the accepted THOR N28 root
+
+`r26_kn020_thor_n29_from_accepted_n28.slurm` implements the single N29 stage
+authorized by the passed N28 reconciliation record. The N28 pass record,
+same-grid cross-solver record, THOR validation record and compressed state are
+all byte-locked before source checkout or nonlinear work begins. The only
+solver seed is the accepted THOR N28 state. Historical failed N29/N30 states,
+legacy roots, pseudo-arclength states, homotopy states and Gu--Emerson
+diagnostic states are neither read nor accepted as fallbacks.
+
+The job uses the same fixed Maxwell/JFM-2009 case and the same bounded THOR
+solver controls that accepted N28. An independent validator recomputes the
+complete raw residual, positivity, wall-pressure, momentum and internal-energy
+balances and structural Jacobian rank on N28 and N29. It then applies the
+unchanged 5% all-field, 15% line and 2% Rana D/G limits on a common 128-by-128
+grid. Only a complete pass authorizes one bounded N30 stage. N29 remains a
+validation result with `production_accepted=false`.
+
 ## Auditing the supplied Code_Saturne sources
 
 The legacy source ZIP itself is not redistributed. After extracting its R13
