@@ -13,6 +13,7 @@ from r26_cases import jfm_maxwell_cavity_case
 from r26_thor_audit import compare_cross_solver_profiles, scaled_singular_spectrum
 from r26_thor_reconciliation import (
     EXPECTED_ROOT_FILE_SHA256,
+    json_native,
     ladder_comparison_passed,
     load_immutable_root,
     n16_n24_profile_envelope,
@@ -149,3 +150,21 @@ def test_legacy_root_acceptance_uses_external_record_but_rejects_explicit_false(
             assert "explicitly rejected" in str(error)
         else:
             raise AssertionError("an explicit rejected state was accepted")
+
+
+def test_numpy_diagnostics_are_json_native_and_unknown_types_fail_closed() -> None:
+    value = {
+        "vector": np.asarray([1.0, 2.0]),
+        "nested": (np.float64(3.0), {"flag": np.bool_(True)}),
+    }
+    native = json_native(value)
+    assert native == {"vector": [1.0, 2.0], "nested": [3.0, {"flag": True}]}
+    import json
+
+    assert json.loads(json.dumps(native, allow_nan=False)) == native
+    try:
+        json_native(object())
+    except TypeError as error:
+        assert "unsupported JSON diagnostic type" in str(error)
+    else:
+        raise AssertionError("an unknown diagnostic type was silently serialized")

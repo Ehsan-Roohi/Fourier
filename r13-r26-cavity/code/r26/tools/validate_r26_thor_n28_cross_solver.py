@@ -23,6 +23,7 @@ from r26_fv_backend import compatible_fv_bulk_residual, wall_bounded_control_vol
 from r26_thor_audit import compare_cross_solver_profiles, state_sha256
 from r26_thor_reconciliation import (
     EXPECTED_ROOT_FILE_SHA256,
+    json_native,
     load_immutable_root,
     same_grid_cross_solver_passed,
 )
@@ -52,7 +53,8 @@ def independent_gate(problem: object, state: np.ndarray, case: object, tolerance
             abs(result.diagnostics.mass_error),
         )
     )
-    balances = global_balance_diagnostics(state, case)
+    balances = json_native(global_balance_diagnostics(state, case))
+    require(isinstance(balances, dict), "global balance diagnostics are not an object")
     passed = bool(
         raw <= tolerance
         and float(diagnostics["min_density"]) > 0.0
@@ -189,8 +191,12 @@ def main() -> None:
         "production_accepted": False,
         "legacy_n28_used_as_solver_seed": False,
     }
-    args.output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps(record, sort_keys=True))
+    native_record = json_native(record)
+    args.output.write_text(
+        json.dumps(native_record, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(native_record, sort_keys=True, allow_nan=False))
     raise SystemExit(0 if passed else 1)
 
 

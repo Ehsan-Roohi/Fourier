@@ -56,6 +56,22 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def json_native(value: object) -> object:
+    """Recursively convert NumPy JSON leaves without hiding unknown types."""
+
+    if isinstance(value, np.ndarray):
+        return json_native(value.tolist())
+    if isinstance(value, np.generic):
+        return json_native(value.item())
+    if isinstance(value, dict):
+        return {str(key): json_native(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_native(item) for item in value]
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    raise TypeError(f"unsupported JSON diagnostic type: {type(value).__name__}")
+
+
 def load_immutable_root(
     path: Path,
     *,
@@ -175,6 +191,7 @@ __all__ = [
     "EXPECTED_ROOT_FILE_SHA256",
     "EXPECTED_ROOT_STATE_SHA256",
     "ImmutableRoot",
+    "json_native",
     "ladder_comparison_passed",
     "load_immutable_root",
     "n16_n24_profile_envelope",

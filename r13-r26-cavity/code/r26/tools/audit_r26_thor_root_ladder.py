@@ -25,6 +25,7 @@ from r26_thor_reconciliation import (
     EXPECTED_ROOT_FILE_SHA256,
     EXPECTED_ROOT_STATE_SHA256,
     ImmutableRoot,
+    json_native,
     ladder_comparison_passed,
     load_immutable_root,
     n16_n24_profile_envelope,
@@ -109,7 +110,8 @@ def independent_root_diagnostics(root: ImmutableRoot, *, thor: bool, raw_toleran
             abs(result.diagnostics.mass_error),
         )
     )
-    balances = global_balance_diagnostics(root.state, case)
+    balances = json_native(global_balance_diagnostics(root.state, case))
+    require(isinstance(balances, dict), "global balance diagnostics are not an object")
     passed = bool(
         raw_gate <= raw_tolerance
         and float(diagnostics["min_density"]) > 0.0
@@ -258,8 +260,12 @@ def main() -> None:
         "legacy_roots_used_as_solver_seed": False,
         "formal_asymptotic_grid_convergence_claim": False,
     }
-    args.output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps(record, sort_keys=True))
+    native_record = json_native(record)
+    args.output.write_text(
+        json.dumps(native_record, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    print(json.dumps(native_record, sort_keys=True, allow_nan=False))
     raise SystemExit(0 if n28_run_authorized else 1)
 
 
