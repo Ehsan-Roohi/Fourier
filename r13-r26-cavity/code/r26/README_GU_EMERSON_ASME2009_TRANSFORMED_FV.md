@@ -87,3 +87,21 @@ largest transient defect.  These controls are diagnostic only and are not
 promoted as paper values.  N16 and all production grids remain unauthorized
 until both the transformed and complete physical N8 gates contract to their
 declared tolerances.
+
+The next bounded N8 profile adds three explicit non-paper safeguards without
+changing equations (56)--(63) or their printed stage order: nonlinear
+equation-(63) non-increase within each scalar block, depth-one Anderson affine
+mixing with raw-Picard fallback, and a ten-sweep nonmonotone outer window with
+backtracking down to `1/4096`.  It retains the best accepted state rather than
+returning a later oscillatory state.  Because equation (62) remains the
+dominant bulk row, the chi block uses a full nominal correction (`1.0`); every
+other transported field and pressure keeps the declared Code_Saturne values.
+
+On N8 at `Kn=0.1`, `U=10 m/s`, this profile improves the simultaneous maximum
+of the physical and transformed gates to `1.070565e-2` at sweep 14.  Later
+sweeps reduce the transformed residual to `3.459903e-3` while the independent
+physical gate rises, so the run is still rejected and the sweep-14 state is
+returned only as a non-accepted diagnostic checkpoint.  This separation shows
+that the next defect to resolve is the transformed-to-physical reconstruction
+consistency near the interior chi/velocity rows, not wall enforcement.  N16
+remains blocked.

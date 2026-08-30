@@ -162,6 +162,14 @@ class GuEmersonReconstructionOptions:
     )
     density_property_relaxation: float = RANA_THERMOPHYSICAL_HISTORY_RELAXATION
     equation_backend: EquationBackend = "physical-balance-defect"
+    scalar_block_safeguard: bool = False
+    outer_anderson_acceleration: bool = False
+    outer_anderson_depth: int = 1
+    outer_sweep_safeguard: bool = False
+    outer_backtracking_factor: float = 0.5
+    outer_minimum_step: float = 1.0 / 128.0
+    outer_sufficient_decrease: float = 1.0e-4
+    outer_nonmonotone_window: int = 1
 
     @classmethod
     def asme2009_equation63_source_backed(
@@ -194,6 +202,32 @@ class GuEmersonReconstructionOptions:
         }
         values.update(overrides)
         return cls(**values)
+
+    @classmethod
+    def asme2009_equation63_safeguarded_n8(
+        cls, **overrides: object
+    ) -> "GuEmersonReconstructionOptions":
+        """Return the bounded N8 development profile for the direct PDE.
+
+        This profile keeps the Code_Saturne field and pressure defaults used
+        by :meth:`asme2009_equation63_source_backed`, but applies the existing
+        declared local wall Picard factor and a bounded nonmonotone full-sweep
+        backtracking safeguard.  Neither control is attributed to Gu--Emerson;
+        the profile is an explicitly non-production globalization experiment.
+        """
+
+        values: dict[str, object] = {
+            "wall_relaxation": 0.25,
+            "scalar_block_safeguard": True,
+            "outer_anderson_acceleration": True,
+            "outer_anderson_depth": 1,
+            "outer_sweep_safeguard": True,
+            "outer_minimum_step": 1.0 / 4096.0,
+            "outer_nonmonotone_window": 10,
+            "chi_relaxation": 1.0,
+        }
+        values.update(overrides)
+        return cls.asme2009_equation63_source_backed(**values)
 
     @classmethod
     def code_saturne_v5_rana_diagnostic(
@@ -265,6 +299,45 @@ class GuEmersonReconstructionOptions:
             raise ValueError(
                 "direct equation-(63) sources cannot be replaced by Rana source history"
             )
+        if (
+            self.scalar_block_safeguard
+            or self.outer_anderson_acceleration
+            or self.outer_sweep_safeguard
+        ) and (
+            self.equation_backend != "equation63-transformed-fv"
+            or self.pressure_density_coupling != "legacy_direct_mass_constrained"
+        ):
+            raise ValueError(
+                "equation-(63) safeguards require the direct backend "
+                "with mass-constrained density"
+            )
+        if not isinstance(self.scalar_block_safeguard, bool):
+            raise TypeError("scalar_block_safeguard must be boolean")
+        if not isinstance(self.outer_anderson_acceleration, bool):
+            raise TypeError("outer_anderson_acceleration must be boolean")
+        if not isinstance(self.outer_anderson_depth, int) or not (
+            1 <= self.outer_anderson_depth <= 8
+        ):
+            raise ValueError("outer_anderson_depth must be an integer in [1,8]")
+        if not isinstance(self.outer_nonmonotone_window, int) or not (
+            1 <= self.outer_nonmonotone_window <= 20
+        ):
+            raise ValueError("outer_nonmonotone_window must be an integer in [1,20]")
+        if self.outer_anderson_acceleration and not self.outer_sweep_safeguard:
+            raise ValueError(
+                "outer Anderson acceleration requires the fail-closed sweep safeguard"
+            )
+        if not isinstance(self.outer_sweep_safeguard, bool):
+            raise TypeError("outer_sweep_safeguard must be boolean")
+        if not (
+            np.isfinite(self.outer_backtracking_factor)
+            and 0.0 < self.outer_backtracking_factor < 1.0
+            and np.isfinite(self.outer_minimum_step)
+            and 0.0 < self.outer_minimum_step <= 1.0
+            and np.isfinite(self.outer_sufficient_decrease)
+            and 0.0 <= self.outer_sufficient_decrease < 1.0
+        ):
+            raise ValueError("outer safeguard controls are outside their admissible ranges")
         if not (
             np.isfinite(self.density_property_relaxation)
             and 0.0 < self.density_property_relaxation <= 1.0
@@ -371,6 +444,38 @@ class GuEmersonReconstructionOptions:
                 ),
                 tag,
             ),
+            "outer_sweep_globalization": NumericalControlSource(
+                (
+                    "enabled bounded nonmonotone full-sweep backtracking: "
+                    f"factor={self.outer_backtracking_factor:g}, "
+                    f"minimum_step={self.outer_minimum_step:g}, "
+                    f"Armijo={self.outer_sufficient_decrease:g}, "
+                    f"nonmonotone_window={self.outer_nonmonotone_window}"
+                    if self.outer_sweep_safeguard
+                    else "disabled"
+                ),
+                tag,
+            ),
+            "scalar_block_globalization": NumericalControlSource(
+                (
+                    "enabled equation-(63) nonlinear-Linf non-increase "
+                    f"backtracking: factor={self.outer_backtracking_factor:g}, "
+                    f"minimum_step={self.outer_minimum_step:g}"
+                    if self.scalar_block_safeguard
+                    else "disabled"
+                ),
+                tag,
+            ),
+            "outer_fixed_point_acceleration": NumericalControlSource(
+                (
+                    f"enabled depth-{self.outer_anderson_depth} Anderson "
+                    "residual-minimizing affine mixing; "
+                    "every candidate remains subject to the outer acceptance safeguard"
+                    if self.outer_anderson_acceleration
+                    else "disabled"
+                ),
+                tag,
+            ),
         }
         return GuEmersonAlgorithmDisclosure(controls=controls)
 
@@ -386,6 +491,13 @@ class GuEmersonSweepRecord:
     min_density: float
     min_temperature: float
     stage_order: tuple[str, ...]
+    accepted_outer_step: float = 1.0
+    backtracking_trials: int = 0
+    normalized_acceptance_merit: float = float("nan")
+    accepted_block_steps: tuple[tuple[str, float], ...] = ()
+    block_backtracking_trials: tuple[tuple[str, int], ...] = ()
+    anderson_used: bool = False
+    anderson_current_weight: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -402,6 +514,8 @@ class GuEmersonReconstructionResult:
     wall_function_evaluations: int
     records: tuple[GuEmersonSweepRecord, ...]
     disclosure: GuEmersonAlgorithmDisclosure
+    best_outer_iteration: int
+    best_normalized_acceptance_merit: float
     provenance: str = GU_EMERSON_RECONSTRUCTION_PROVENANCE
 
 
@@ -459,6 +573,8 @@ class _SegregatedReconstructionOperators:
         self._source_history: np.ndarray | None = None
         self._simple_inverse_momentum_diagonal: tuple[np.ndarray, np.ndarray] | None = None
         self._saturne_total_pressure: np.ndarray | None = None
+        self.accepted_block_steps: dict[str, float] = {}
+        self.block_backtracking_trials: dict[str, int] = {}
         self.completed_sweeps = 0
 
     @property
@@ -691,6 +807,8 @@ class _SegregatedReconstructionOperators:
         if not np.isfinite(residual).all():
             raise FloatingPointError(f"{stage} defect contains NaN or infinity")
         if np.max(np.abs(residual), initial=0.0) == 0.0:
+            self.accepted_block_steps[stage] = 0.0
+            self.block_backtracking_trials[stage] = 0
             return fields
         matrix = self._block_matrices.get(stage)
         factor = self._block_factors.get(stage)
@@ -726,10 +844,55 @@ class _SegregatedReconstructionOperators:
             )[0]
         if not np.isfinite(correction).all():
             raise FloatingPointError(f"{stage} block correction is non-finite")
-        updated = encoded + self.options.relaxation(stage) * correction
-        return with_vector(updated)
+        accepted_step = self.options.relaxation(stage)
+        trials = 0
+        updated = with_vector(encoded + accepted_step * correction)
+        if self.options.scalar_block_safeguard and stage != "velocity":
+            baseline_merit = float(
+                np.max(
+                    np.abs(
+                        gu_emerson_transformed_fv_residual(
+                            fields, case=self.problem.case
+                        )[1:-1, 1:-1]
+                    ),
+                    initial=0.0,
+                )
+            )
+            candidate_merit = float(
+                np.max(
+                    np.abs(
+                        gu_emerson_transformed_fv_residual(
+                            updated, case=self.problem.case
+                        )[1:-1, 1:-1]
+                    ),
+                    initial=0.0,
+                )
+            )
+            while candidate_merit > baseline_merit * (1.0 + 1.0e-12):
+                accepted_step *= self.options.outer_backtracking_factor
+                trials += 1
+                if accepted_step < self.options.outer_minimum_step:
+                    accepted_step = 0.0
+                    updated = fields
+                    break
+                updated = with_vector(encoded + accepted_step * correction)
+                candidate_merit = float(
+                    np.max(
+                        np.abs(
+                            gu_emerson_transformed_fv_residual(
+                                updated, case=self.problem.case
+                            )[1:-1, 1:-1]
+                        ),
+                        initial=0.0,
+                    )
+                )
+        self.accepted_block_steps[stage] = accepted_step
+        self.block_backtracking_trials[stage] = trials
+        return updated
 
     def solve_velocity(self, fields: GuEmersonFields) -> GuEmersonFields:
+        self.accepted_block_steps = {}
+        self.block_backtracking_trials = {}
         fields = self._apply_lagged_density_property(fields)
         self._refresh_source_history(fields)
         if self.completed_sweeps % self.options.matrix_refresh_interval == 0:
@@ -999,6 +1162,84 @@ def _gate(problem: R26NodeBVP, state: np.ndarray) -> tuple[float, object, bool]:
     return raw, diagnostics, bool(diagnostics.min_density > 0.0 and diagnostics.min_temperature > 0.0)
 
 
+def _sweep_metrics(
+    problem: R26NodeBVP,
+    fields: GuEmersonFields,
+    state: np.ndarray,
+    options: GuEmersonReconstructionOptions,
+) -> tuple[float, object, bool, float, float]:
+    """Return every acceptance metric and their tolerance-normalized maximum."""
+
+    raw, diagnostics, positive = _gate(problem, state)
+    transformed_linf = (
+        float(
+            np.max(
+                np.abs(
+                    gu_emerson_transformed_fv_residual(
+                        fields, case=problem.case
+                    )[1:-1, 1:-1]
+                ),
+                initial=0.0,
+            )
+        )
+        if options.equation_backend == "equation63-transformed-fv"
+        else float("nan")
+    )
+    normalized = [
+        raw / options.raw_tolerance,
+        diagnostics.total_linf / options.scaled_tolerance,
+        abs(diagnostics.held_out_continuity)
+        / options.held_continuity_tolerance,
+        abs(diagnostics.mass_error) / options.mass_tolerance,
+    ]
+    if options.equation_backend == "equation63-transformed-fv":
+        normalized.append(transformed_linf / options.raw_tolerance)
+    merit = float(max(normalized)) if positive else float("inf")
+    return raw, diagnostics, positive, transformed_linf, merit
+
+
+def _anderson_candidate(
+    map_states: list[np.ndarray],
+    map_residuals: list[np.ndarray],
+    component_scale: np.ndarray,
+) -> tuple[np.ndarray, float, bool]:
+    """Return a residual-minimizing affine mix of fixed-point maps."""
+
+    scale = np.asarray(component_scale, dtype=float)
+    if scale.shape != (17,) or np.any(scale <= 0.0):
+        raise ValueError("Anderson component scale must contain 17 positive values")
+    if len(map_states) != len(map_residuals) or len(map_states) < 2:
+        raise ValueError("Anderson mixing requires matching histories of length >= 2")
+    residual_columns = [
+        (np.asarray(value, dtype=float) / scale).ravel()
+        for value in map_residuals
+    ]
+    reference = residual_columns[-1]
+    differences = np.column_stack(
+        [value - reference for value in residual_columns[:-1]]
+    )
+    if not np.isfinite(differences).all() or not np.isfinite(reference).all():
+        return np.asarray(map_states[-1], dtype=float), 1.0, False
+    coefficients, _, rank, _ = np.linalg.lstsq(
+        differences, -reference, rcond=None
+    )
+    if rank == 0 or not np.isfinite(coefficients).all():
+        return np.asarray(map_states[-1], dtype=float), 1.0, False
+    weights = np.concatenate((coefficients, (1.0 - float(np.sum(coefficients)),)))
+    candidate = np.zeros_like(np.asarray(map_states[-1], dtype=float))
+    for weight, mapped in zip(weights, map_states, strict=True):
+        candidate += weight * np.asarray(mapped, dtype=float)
+    current_weight = float(weights[-1])
+    if (
+        not np.isfinite(current_weight)
+        or not np.isfinite(candidate).all()
+        or np.any(candidate[..., 0] <= 0.0)
+        or np.any(candidate[..., 3] <= 0.0)
+    ):
+        return np.asarray(map_states[-1], dtype=float), 1.0, False
+    return candidate, current_weight, True
+
+
 def solve_gu_emerson_reconstruction(
     problem: R26NodeBVP,
     initial_state: np.ndarray,
@@ -1022,8 +1263,18 @@ def solve_gu_emerson_reconstruction(
     records: list[GuEmersonSweepRecord] = []
     converged = False
     message = "bounded Gu--Emerson reconstruction work budget exhausted"
+    baseline = _sweep_metrics(problem, fields, state, options)
+    accepted_merit_history = [baseline[-1]]
+    best_state = state.copy()
+    best_fields = fields
+    best_outer_iteration = 0
+    best_merit = baseline[-1]
+    map_state_history: list[np.ndarray] = []
+    map_residual_history: list[np.ndarray] = []
 
     for outer in range(1, options.max_outer_iterations + 1):
+        previous_state = state
+        previous_fields = fields
         operators.executed_stages = []
         sweep = advance_gu_emerson_outer_iteration(
             fields,
@@ -1034,23 +1285,104 @@ def solve_gu_emerson_reconstruction(
         )
         if tuple(operators.executed_stages) != GU_EMERSON_STAGE_ORDER:
             raise RuntimeError("published Gu--Emerson stage order was not executed exactly")
-        fields = sweep.fields
-        state = sweep.physical_state
-        raw, diagnostics, positive = _gate(problem, state)
-        transformed_linf = (
-            float(
-                np.max(
-                    np.abs(
-                        gu_emerson_transformed_fv_residual(
-                            fields, case=problem.case
-                        )[1:-1, 1:-1]
-                    ),
-                    initial=0.0,
+        current_map_state = sweep.physical_state
+        current_map_residual = current_map_state - previous_state
+        proposed_fields = sweep.fields
+        proposed_state = current_map_state
+        anderson_used = False
+        anderson_current_weight = 1.0
+        if (
+            options.outer_anderson_acceleration
+            and map_state_history
+        ):
+            proposed_state, anderson_current_weight, anderson_used = (
+                _anderson_candidate(
+                    map_state_history + [current_map_state],
+                    map_residual_history + [current_map_residual],
+                    problem.case.scaling.bulk,
                 )
             )
-            if options.equation_backend == "equation63-transformed-fv"
-            else float("nan")
-        )
+            if anderson_used:
+                proposed_fields = gu_emerson_fields_from_state(
+                    proposed_state,
+                    x=problem.case.x,
+                    y=problem.case.y,
+                    mu=problem.case.mu(proposed_state[..., 3]),
+                )
+        accepted_step = 1.0
+        backtracking_trials = 0
+        rejected = False
+        if not options.outer_sweep_safeguard:
+            metrics = _sweep_metrics(
+                problem, proposed_fields, proposed_state, options
+            )
+        else:
+            baseline_merit = max(
+                accepted_merit_history[-options.outer_nonmonotone_window :]
+            )
+            candidates = [(proposed_state, proposed_fields, anderson_used)]
+            if anderson_used:
+                candidates.append((current_map_state, sweep.fields, False))
+            accepted = False
+            for full_step_state, full_step_fields, candidate_uses_anderson in candidates:
+                accepted_step = 1.0
+                proposed_state = full_step_state
+                proposed_fields = full_step_fields
+                metrics = _sweep_metrics(
+                    problem, proposed_fields, proposed_state, options
+                )
+                while metrics[-1] > baseline_merit * (
+                    1.0 - options.outer_sufficient_decrease * accepted_step
+                ):
+                    accepted_step *= options.outer_backtracking_factor
+                    backtracking_trials += 1
+                    if accepted_step < options.outer_minimum_step:
+                        break
+                    proposed_state = previous_state + accepted_step * (
+                        full_step_state - previous_state
+                    )
+                    if (
+                        np.any(proposed_state[..., 0] <= 0.0)
+                        or np.any(proposed_state[..., 3] <= 0.0)
+                    ):
+                        metrics = (
+                            float("inf"),
+                            baseline[1],
+                            False,
+                            float("inf"),
+                            float("inf"),
+                        )
+                        continue
+                    proposed_fields = gu_emerson_fields_from_state(
+                        proposed_state,
+                        x=problem.case.x,
+                        y=problem.case.y,
+                        mu=problem.case.mu(proposed_state[..., 3]),
+                    )
+                    metrics = _sweep_metrics(
+                        problem, proposed_fields, proposed_state, options
+                    )
+                if accepted_step >= options.outer_minimum_step:
+                    anderson_used = candidate_uses_anderson
+                    if not anderson_used:
+                        anderson_current_weight = 1.0
+                    accepted = True
+                    break
+            if not accepted:
+                accepted_step = 0.0
+                proposed_fields = previous_fields
+                proposed_state = previous_state
+                metrics = baseline
+                rejected = True
+                anderson_used = False
+                anderson_current_weight = 1.0
+                message = (
+                    "bounded outer safeguard rejected both the Anderson "
+                    "candidate and raw published-order sweep at its minimum step"
+                )
+        fields = proposed_fields
+        state = proposed_state
+        raw, diagnostics, positive, transformed_linf, merit = metrics
         record = GuEmersonSweepRecord(
             outer_iteration=outer,
             raw_gate=raw,
@@ -1061,10 +1393,28 @@ def solve_gu_emerson_reconstruction(
             min_density=diagnostics.min_density,
             min_temperature=diagnostics.min_temperature,
             stage_order=tuple(operators.executed_stages),
+            accepted_outer_step=accepted_step,
+            backtracking_trials=backtracking_trials,
+            normalized_acceptance_merit=merit,
+            accepted_block_steps=tuple(
+                (name, operators.accepted_block_steps.get(name, float("nan")))
+                for name in FIELD_SLOTS
+            ),
+            block_backtracking_trials=tuple(
+                (name, operators.block_backtracking_trials.get(name, 0))
+                for name in FIELD_SLOTS
+            ),
+            anderson_used=anderson_used,
+            anderson_current_weight=anderson_current_weight,
         )
         records.append(record)
         if record_callback is not None:
             record_callback(record, state)
+        if not rejected and merit < best_merit:
+            best_state = state.copy()
+            best_fields = fields
+            best_outer_iteration = outer
+            best_merit = merit
         converged = bool(
             positive
             and raw <= options.raw_tolerance
@@ -1085,7 +1435,22 @@ def solve_gu_emerson_reconstruction(
                 else "complete raw R26 gate reached by published-order reconstruction"
             )
             break
+        if rejected:
+            break
+        map_state_history.append(current_map_state.copy())
+        map_residual_history.append(current_map_residual.copy())
+        if len(map_state_history) > options.outer_anderson_depth:
+            map_state_history.pop(0)
+            map_residual_history.pop(0)
+        baseline = metrics
+        accepted_merit_history.append(merit)
 
+    if options.outer_sweep_safeguard and not converged:
+        state = best_state
+        fields = best_fields
+        message = (
+            f"{message}; returning best accepted sweep {best_outer_iteration}"
+        )
     return GuEmersonReconstructionResult(
         state=state,
         fields=fields,
@@ -1099,6 +1464,8 @@ def solve_gu_emerson_reconstruction(
         wall_function_evaluations=operators.wall_function_evaluations,
         records=tuple(records),
         disclosure=disclosure,
+        best_outer_iteration=best_outer_iteration,
+        best_normalized_acceptance_merit=best_merit,
     )
 
 

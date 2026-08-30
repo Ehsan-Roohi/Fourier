@@ -17,6 +17,7 @@ from r26_gu_emerson_reconstruction import (
     RANA_THERMOPHYSICAL_HISTORY_RELAXATION,
     GuEmersonReconstructionOptions,
     _SegregatedReconstructionOperators,
+    _anderson_candidate,
     make_gu_emerson_reconstruction_problem,
     solve_gu_emerson_reconstruction,
 )
@@ -43,6 +44,52 @@ def test_reconstruction_controls_are_complete_and_explicitly_nonpaper() -> None:
         "gamma": 5.0e-1,
         "chi": 1.0e-1,
     }
+
+
+def test_safeguarded_equation63_profile_is_bounded_and_disclosed() -> None:
+    options = GuEmersonReconstructionOptions.asme2009_equation63_safeguarded_n8(
+        max_outer_iterations=1
+    )
+    assert options.equation_backend == "equation63-transformed-fv"
+    assert options.scalar_block_safeguard
+    assert options.outer_anderson_acceleration
+    assert options.outer_anderson_depth == 1
+    assert options.outer_sweep_safeguard
+    assert options.outer_nonmonotone_window == 10
+    assert options.outer_minimum_step == 1.0 / 4096.0
+    assert options.wall_relaxation == 0.25
+    assert options.chi_relaxation == 1.0
+    controls = options.disclosure.controls or {}
+    assert "nonmonotone_window=10" in controls["outer_sweep_globalization"].value
+    assert "depth-1 Anderson" in controls["outer_fixed_point_acceleration"].value
+
+
+def test_equation63_safeguards_reject_incompatible_backends() -> None:
+    try:
+        GuEmersonReconstructionOptions(outer_sweep_safeguard=True)
+    except ValueError as exc:
+        assert "direct backend" in str(exc)
+    else:
+        raise AssertionError("safeguard must not enter the physical-defect backend")
+
+
+def test_depth_one_anderson_affine_mix_minimizes_opposite_residuals() -> None:
+    first = np.ones((1, 1, 17))
+    second = np.ones((1, 1, 17))
+    first[..., 1] = 0.5
+    second[..., 1] = 1.5
+    first_residual = np.zeros_like(first)
+    second_residual = np.zeros_like(second)
+    first_residual[..., 1] = 1.0
+    second_residual[..., 1] = -1.0
+    candidate, current_weight, used = _anderson_candidate(
+        [first, second],
+        [first_residual, second_residual],
+        np.ones(17),
+    )
+    assert used
+    assert current_weight == 0.5
+    np.testing.assert_allclose(candidate, 0.5 * (first + second))
 
 
 def test_zero_lid_equilibrium_survives_one_complete_published_order_sweep() -> None:
