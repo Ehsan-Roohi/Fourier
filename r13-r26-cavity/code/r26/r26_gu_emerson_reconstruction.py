@@ -502,6 +502,12 @@ class GuEmersonSweepRecord:
     block_backtracking_trials: tuple[tuple[str, int], ...] = ()
     anderson_used: bool = False
     anderson_current_weight: float = 1.0
+    outer_acceptance_baseline_merit: float = float("nan")
+    anderson_full_step_merit: float = float("nan")
+    raw_full_step_merit: float = float("nan")
+    best_trial_merit: float = float("nan")
+    best_trial_step: float = float("nan")
+    best_trial_kind: str = ""
     physical_point_linf: float = float("nan")
     transport_discretization_linf: float = float("nan")
     source_discretization_linf: float = float("nan")
@@ -1382,25 +1388,60 @@ def solve_gu_emerson_reconstruction(
         accepted_step = 1.0
         backtracking_trials = 0
         rejected = False
+        outer_acceptance_baseline_merit = float("nan")
+        anderson_full_step_merit = float("nan")
+        raw_full_step_merit = float("nan")
+        best_trial_merit = float("inf")
+        best_trial_step = float("nan")
+        best_trial_kind = ""
+
+        def record_trial(kind: str, step: float, trial_metrics: tuple) -> None:
+            nonlocal best_trial_merit, best_trial_step, best_trial_kind
+            trial_merit = float(trial_metrics[4])
+            if trial_merit < best_trial_merit:
+                best_trial_merit = trial_merit
+                best_trial_step = step
+                best_trial_kind = kind
+
         if not options.outer_sweep_safeguard:
             metrics = _sweep_metrics(
                 problem, proposed_fields, proposed_state, options
             )
+            record_trial("raw", 1.0, metrics)
+            raw_full_step_merit = float(metrics[4])
         else:
             baseline_merit = max(
                 accepted_merit_history[-options.outer_nonmonotone_window :]
             )
-            candidates = [(proposed_state, proposed_fields, anderson_used)]
+            outer_acceptance_baseline_merit = baseline_merit
+            candidates = [
+                (
+                    proposed_state,
+                    proposed_fields,
+                    anderson_used,
+                    "anderson" if anderson_used else "raw",
+                )
+            ]
             if anderson_used:
-                candidates.append((current_map_state, sweep.fields, False))
+                candidates.append((current_map_state, sweep.fields, False, "raw"))
             accepted = False
-            for full_step_state, full_step_fields, candidate_uses_anderson in candidates:
+            for (
+                full_step_state,
+                full_step_fields,
+                candidate_uses_anderson,
+                candidate_kind,
+            ) in candidates:
                 accepted_step = 1.0
                 proposed_state = full_step_state
                 proposed_fields = full_step_fields
                 metrics = _sweep_metrics(
                     problem, proposed_fields, proposed_state, options
                 )
+                record_trial(candidate_kind, accepted_step, metrics)
+                if candidate_kind == "anderson":
+                    anderson_full_step_merit = float(metrics[4])
+                else:
+                    raw_full_step_merit = float(metrics[4])
                 while metrics[4] > baseline_merit * (
                     1.0 - options.outer_sufficient_decrease * accepted_step
                 ):
@@ -1433,6 +1474,7 @@ def solve_gu_emerson_reconstruction(
                     metrics = _sweep_metrics(
                         problem, proposed_fields, proposed_state, options
                     )
+                    record_trial(candidate_kind, accepted_step, metrics)
                 if accepted_step >= options.outer_minimum_step:
                     anderson_used = candidate_uses_anderson
                     if not anderson_used:
@@ -1477,6 +1519,12 @@ def solve_gu_emerson_reconstruction(
             ),
             anderson_used=anderson_used,
             anderson_current_weight=anderson_current_weight,
+            outer_acceptance_baseline_merit=outer_acceptance_baseline_merit,
+            anderson_full_step_merit=anderson_full_step_merit,
+            raw_full_step_merit=raw_full_step_merit,
+            best_trial_merit=best_trial_merit,
+            best_trial_step=best_trial_step,
+            best_trial_kind=best_trial_kind,
             physical_point_linf=consistency.physical_point_linf,
             transport_discretization_linf=(
                 consistency.transport_discretization_linf

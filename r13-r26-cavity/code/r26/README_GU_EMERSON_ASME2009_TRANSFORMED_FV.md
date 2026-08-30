@@ -182,3 +182,17 @@ cell-centred-source result (`1.395834e-2`); the source-scheme mismatch has
 fallen to `7.900630e-5`.  Sweep 24 is the best simultaneous checkpoint.  N8
 still fails the `1e-8` gate, so N16 remains blocked; the next bounded stage
 must continue on this N8 face-consistent system.
+
+The outer safeguard now preserves the acceptance baseline, both full-step
+merits, and the best attempted kind/step/merit when a sweep is rejected.  A
+48-sweep request stops fail-closed at sweep 34: the best accepted checkpoint
+is sweep 29 with raw merit `4.473728e-3`.  At the stopping state, even the best
+raw trial at the minimum `1/4096` step raises the normalized merit from
+`5.107024e5` to `5.107252e5`, proving that the fixed-point direction is locally
+ascending rather than merely failing a sufficient-decrease margin.  Restarting
+once from sweep 29 with an empty Anderson history improves the raw gate to
+`4.433743e-3`; a second clean restart has no descending trial and its minimum
+step gives `4.433763e-3`.  Repeated restarts are therefore rejected as the next
+method.  Slot 3 (`temperature`) controls the transformed residual at this new
+best state, so the next N8 stage must isolate that block's update.  N16 remains
+blocked.

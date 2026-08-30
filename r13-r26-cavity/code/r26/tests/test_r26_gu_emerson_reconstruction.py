@@ -64,6 +64,27 @@ def test_safeguarded_equation63_profile_is_bounded_and_disclosed() -> None:
     assert "depth-1 Anderson" in controls["outer_fixed_point_acceleration"].value
 
 
+def test_outer_safeguard_records_every_acceptance_merit_baseline() -> None:
+    case = replace(
+        gu_asme2009_cavity_case(5, kn=0.1, lid_speed_m_per_s=10.0),
+        lid_velocity=0.0,
+    )
+    result = solve_gu_emerson_reconstruction(
+        make_gu_emerson_reconstruction_problem(case),
+        case.equilibrium_state(),
+        options=GuEmersonReconstructionOptions.asme2009_equation63_safeguarded_n8(
+            max_outer_iterations=1
+        ),
+    )
+    record = result.records[0]
+    assert np.isfinite(record.outer_acceptance_baseline_merit)
+    assert np.isnan(record.anderson_full_step_merit)
+    assert record.raw_full_step_merit == 0.0
+    assert record.best_trial_merit == 0.0
+    assert record.best_trial_step == 1.0
+    assert record.best_trial_kind == "raw"
+
+
 def test_equation63_safeguards_reject_incompatible_backends() -> None:
     try:
         GuEmersonReconstructionOptions(outer_sweep_safeguard=True)
