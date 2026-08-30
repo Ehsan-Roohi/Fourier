@@ -193,6 +193,26 @@ ascending rather than merely failing a sufficient-decrease margin.  Restarting
 once from sweep 29 with an empty Anderson history improves the raw gate to
 `4.433743e-3`; a second clean restart has no descending trial and its minimum
 step gives `4.433763e-3`.  Repeated restarts are therefore rejected as the next
-method.  Slot 3 (`temperature`) controls the transformed residual at this new
-best state, so the next N8 stage must isolate that block's update.  N16 remains
-blocked.
+method.
+
+A stage-by-stage replay at the `4.433743e-3` checkpoint localizes the ascent.
+The velocity stage first raises the merit to `4.584644e-3`; SIMPLE and the
+successive interior blocks then reduce it through `4.429066e-3`,
+`4.416446e-3`, and finally `4.401497e-3` after `h`.  The `omega`, `gamma`, and
+`chi` blocks preserve that value.  Only the final wall reconstruction raises
+the merit to `5.080962e-3` and changes the dominant transformed row from slot
+3 (`temperature`) to slot 16 (`chi`).  Scaling one already-computed wall
+correction shows a smooth increase: zero wall correction gives
+`4.401497e-3`, one quarter of the correction gives `4.429170e-3`, and the full
+declared wall correction gives `5.080962e-3`.
+
+Two bounded globalization responses were tested and rejected.  Applying a
+wall safeguard throughout the run worsened the best 24--36-sweep gates to
+`9.430828e-3` and `9.948198e-3`, depending on its reference merit.  Activating
+wall-only reduction solely after the original outer rejection carried the run
+through sweep 48 but did not improve the `4.473728e-3` best checkpoint; after
+a clean best-state restart, 24 more sweeps still did not improve the first
+`4.433743e-3` checkpoint.  No wall-globalization experiment is retained in
+the solver.  The next N8 stage is therefore the wall-reconstruction/closure
+coupling that injects the slot-16 defect, not more relaxation, restarts, or
+grid refinement.  N16 remains blocked.
