@@ -16,8 +16,9 @@ The direct backend uses the structure printed in section 5.2:
 - collocated finite volumes;
 - CUBISTA convection of each transformed field;
 - central face diffusion with the printed `mu/Gamma_Phi` coefficients;
-- conservative discretization of every printed RHS flux in equations
-  (56)--(62), with only collision/nonlinear local terms evaluated centrally;
+- compatible conservative RHS fluxes for equations (56)--(61), and the
+  directly assembled, centrally differenced bracketed source in equation
+  (62), with collision/nonlinear local terms evaluated at cell centres;
 - segregated Picard linearisation: source, viscosity and mass flux are frozen
   at the entry to each field block and rebuilt before the next printed field;
 - the dissipative linear collision sinks printed in equations (58)--(62) are
@@ -26,15 +27,17 @@ The direct backend uses the structure printed in section 5.2:
 - the printed segregated order `u -> SIMPLE -> T -> g -> h -> omega -> gamma
   -> chi -> physical moments -> wall conditions`.
 
-The long right-hand sides of equations (58)--(62) are represented in their
-printed conservative flux form.  Each RHS divergence is the difference
-between the transformed equation-(63) flux and the reconstructed
-physical-moment flux; the local `Sigma,Q,M,S,N` and collision terms remain
-explicitly evaluated.  This uses the same CUBISTA faces, wall-bounded control
-volumes and physical-wall fluxes on both sides, but it never calls the
-physical BVP residual from a transformed field block.  A manufactured
-non-equilibrium test independently verifies that all interior transformed
-rows reproduce the compatible physical FV rows to `3e-13`.
+The long right-hand sides of equations (58)--(61) are represented in their
+printed conservative flux form as the difference between the transformed
+equation-(63) flux and the reconstructed physical-moment flux.  For equation
+(62), the `Delta_G` transport, `Omega^R`, collision and `N` terms are assembled
+directly; its source flux is centrally interpolated rather than formed by
+subtracting two nonlinear CUBISTA reconstructions.  The compatible equation-
+(62) source is retained in the term record as an audit baseline.  The backend
+never calls the physical BVP residual from a transformed field block.  A
+manufactured non-equilibrium test verifies the compatible identity for slots
+0--15 to `3e-13`, confirms that the direct slot-16 source is distinct, and
+keeps equilibrium as an exact conservative fixed point.
 
 ## Literal ASME cavity contract
 
@@ -142,3 +145,14 @@ is dominant at sweeps 16, 20 and 24.  The next bounded development stage is
 therefore the equation-(62)/`chi` source-coupling linearisation on N8, not a
 larger grid or another undiagnosed work-budget increase.  N16 remains
 unauthorized.
+
+The first equation-(62) source-fidelity stage now follows the paper's stated
+central source discretization directly.  It leaves the N8 history unchanged
+through sweep 8.  At sweep 20 the raw gate is `9.283571e-3`, slightly below
+the compatible baseline `9.695921e-3`, but the 24-sweep gate is
+`1.640931e-2`, above the compatible baseline `6.349235e-3`; the best checkpoint
+is sweep 23.  This commit therefore records a source-discretization correction,
+not a convergence claim.  N8 still fails closed and N16 remains blocked.  The
+next bounded source stage is to centralize the remaining printed RHS fluxes
+consistently rather than mix the direct equation-(62) source with compatible
+CUBISTA-difference sources in equations (56)--(61).

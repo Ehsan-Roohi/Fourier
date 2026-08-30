@@ -403,10 +403,11 @@ class GuEmersonReconstructionOptions:
                     )
                     if self.use_rana_source_history
                     else (
-                        "direct equation-(63) central source identity from audited "
-                        "Gu--Emerson physical equations; printed linear collision "
-                        "sinks implicit; remaining source, viscosity and mass flux "
-                        "frozen within each sequential field block"
+                        "direct equation-(63) conservative sources with the "
+                        "equation-(62) bracket centrally differenced; "
+                        "printed linear collision sinks implicit; remaining "
+                        "source, viscosity and mass flux frozen within each "
+                        "sequential field block"
                         if direct_equation63
                         else "Gu--Emerson field defect with no transferred Rana source history"
                     )

@@ -14,14 +14,14 @@ directly for ``Phi=(u,T,g,h,omega,gamma,chi)``.  CUBISTA is used for the
 convected transformed field, central face differences for diffusion, the
 existing Rhie--Chow mass flux for pressure--velocity coupling, and the same
 wall-bounded conservative control volumes as the independent physical R26
-gate.  The source is evaluated without transcribing the very long expanded
-right-hand sides (58)--(62) component by component.  Instead, every printed
-divergence on the right is assembled as the conservative difference between
-the transformed equation-(63) flux and its reconstructed physical-moment
-flux.  The remaining collision and nonlinear terms are evaluated directly
-from ``Sigma,Q,M,S,N``.  This is the flux form of equations (56)--(62); it
-does not call the physical BVP residual and it uses the same CUBISTA faces,
-wall-bounded volumes and physical-wall fluxes on both sides.
+gate.  The source is evaluated without transcribing every expanded tensor
+component.  Equations (56)--(61) use the conservative difference between the
+transformed equation-(63) flux and its reconstructed physical-moment flux.
+Equation (62) is assembled directly as printed so that its bracketed
+``Delta_G`` transport is centrally differenced as a source instead of being
+represented by the difference of two nonlinear CUBISTA fluxes.  The remaining
+collision and nonlinear terms are evaluated directly from ``Sigma,Q,M,S,N``.
+This path does not call the physical BVP residual.
 
 Only interior entries are balance rows.  Smooth-wall and corner rows remain
 owned by ``r26_discretization`` and are independently checked in physical
@@ -68,8 +68,8 @@ from r26_tensor_closures import (
 GU_EMERSON_TRANSFORMED_FV_PROVENANCE: Final[str] = (
     "Gu--Emerson JFM 636 (2009), Eqs. (48)--(63) and Sec. 5.2: direct "
     "transformed-variable FV, CUBISTA convection, compatible conservative "
-    "discretization of every printed source flux, central local sources, "
-    "and SIMPLE/Rhie--Chow mass flux"
+    "sources for Eqs. (56)--(61), direct central Eq. (62) source, and "
+    "SIMPLE/Rhie--Chow mass flux"
 )
 
 
@@ -81,6 +81,9 @@ class GuEmersonEquation63Terms:
     finite_volume_lhs: np.ndarray
     central_point_lhs: np.ndarray
     source: np.ndarray
+    source_transport: np.ndarray
+    physical_local_terms: np.ndarray
+    compatible_source: np.ndarray
     physical_point_residual: np.ndarray
     gamma_by_slot: np.ndarray
     provenance: str = GU_EMERSON_TRANSFORMED_FV_PROVENANCE
@@ -129,8 +132,7 @@ class GuEmersonEquation63PicardData:
     mass_y: np.ndarray
     provenance: str = (
         "Gu--Emerson JFM 636 (2009), Sec. 5.2 segregated Picard stage: "
-        "compatible conservative source and transport coefficients evaluated "
-        "at stage entry"
+        "central source and transport coefficients evaluated at stage entry"
     )
 
 
@@ -512,16 +514,111 @@ def _physical_local_terms(
     )
 
 
+def _direct_equation62_source(
+    physical: np.ndarray,
+    packed: np.ndarray,
+    mu: np.ndarray,
+    closures: R26Closures,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> np.ndarray:
+    """Discretize the printed steady right-hand side of equation (62).
+
+    Gu--Emerson apply central differencing to source terms.  In particular,
+    the bracketed transport of ``Delta_G`` is not a second CUBISTA flux.  Its
+    direct central discretization avoids subtracting the physical and
+    transformed CUBISTA fluxes, whose nonlinear reconstructions do not obey
+    the continuous ``Delta = Delta_G + rho*chi`` cancellation face by face.
+    """
+
+    tensors = planar_state_to_tensors(physical)
+    gradients = finite_difference_gradients(
+        physical, x=x, y=y, edge_order=2
+    )
+    derivatives = closure_derivatives_on_grid(
+        closures, x, y, edge_order=2
+    )
+    nonlinear = gu_emerson_nonlinear_sources(
+        tensors, gradients, closures, derivatives, mu=mu
+    )
+    rho = np.asarray(tensors.rho)
+    velocity = np.asarray(tensors.velocity)
+    delta = np.asarray(tensors.Delta)
+    delta_g = delta - rho * packed[..., 16]
+    delta_g_over_rho = delta_g / rho
+    grad_delta_over_rho = (
+        np.asarray(gradients.Delta) / rho[..., None]
+        - delta[..., None]
+        * np.asarray(gradients.rho)
+        / rho[..., None] ** 2
+    )
+    omega_remainder = (
+        np.asarray(closures.Omega)
+        + 7.0 / 3.0 * mu[..., None] * grad_delta_over_rho
+    )
+
+    flux_x = -_face_average(velocity[..., 0] * delta_g, 1)
+    flux_y = -_face_average(velocity[..., 1] * delta_g, 0)
+    flux_x += _face_average(7.0 / 3.0 * mu, 1) * _normal_face_gradient(
+        delta_g_over_rho, x, axis=1
+    )
+    flux_y += _face_average(7.0 / 3.0 * mu, 0) * _normal_face_gradient(
+        delta_g_over_rho, y, axis=0
+    )
+    flux_x -= _face_average(omega_remainder[..., 0], 1)
+    flux_y -= _face_average(omega_remainder[..., 1], 0)
+
+    d_dx = np.gradient(delta_g_over_rho, x, axis=1, edge_order=2)
+    d_dy = np.gradient(delta_g_over_rho, y, axis=0, edge_order=2)
+    wall_x = np.zeros_like(rho)
+    wall_y = np.zeros_like(rho)
+    wall_x[:, 0] = (
+        -velocity[:, 0, 0] * delta_g[:, 0]
+        + 7.0 / 3.0 * mu[:, 0] * d_dx[:, 0]
+        - omega_remainder[:, 0, 0]
+    )
+    wall_x[:, -1] = (
+        -velocity[:, -1, 0] * delta_g[:, -1]
+        + 7.0 / 3.0 * mu[:, -1] * d_dx[:, -1]
+        - omega_remainder[:, -1, 0]
+    )
+    wall_y[0, :] = (
+        -velocity[0, :, 1] * delta_g[0, :]
+        + 7.0 / 3.0 * mu[0, :] * d_dy[0, :]
+        - omega_remainder[0, :, 1]
+    )
+    wall_y[-1, :] = (
+        -velocity[-1, :, 1] * delta_g[-1, :]
+        + 7.0 / 3.0 * mu[-1, :] * d_dy[-1, :]
+        - omega_remainder[-1, :, 1]
+    )
+    transport = wall_bounded_face_divergence(
+        flux_x, flux_y, wall_x, wall_y, x, y
+    )
+    pressure = rho * np.asarray(tensors.theta)
+    collision = 2.0 / 3.0 * pressure * rho / mu * packed[..., 16]
+    source = transport - collision + np.asarray(nonlinear.N)
+    source[[0, -1], :] = 0.0
+    source[:, [0, -1]] = 0.0
+    return source
+
+
 def _compatible_equation63_source(
     physical: np.ndarray,
+    packed: np.ndarray,
     mu: np.ndarray,
     closures: R26Closures,
     transformed_fluxes: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray],
     faces: CompatibleFaceFields,
     x: np.ndarray,
     y: np.ndarray,
-) -> np.ndarray:
-    """Discretize the printed RHS fluxes of equations (56)--(62)."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Return the direct source and its compatible-flux audit baseline.
+
+    The compatible construction remains active for equations (56)--(61).
+    Equation (62) is replaced by its printed central source discretization;
+    the compatible value is retained separately for diagnostics.
+    """
 
     physical_fluxes = _physical_fv_fluxes(physical, closures, faces)
     source_fluxes = tuple(
@@ -533,12 +630,28 @@ def _compatible_equation63_source(
     source_transport = wall_bounded_face_divergence(
         *source_fluxes, x, y
     )
-    source = source_transport - _physical_local_terms(
+    physical_local_terms = _physical_local_terms(
         physical, mu, closures, x, y
+    )
+    compatible_source = source_transport - physical_local_terms
+    source = compatible_source.copy()
+    source[..., 16] = _direct_equation62_source(
+        physical,
+        packed,
+        mu,
+        closures,
+        x,
+        y,
     )
     source[[0, -1], :, :] = 0.0
     source[:, [0, -1], :] = 0.0
-    return source
+    source_transport[[0, -1], :, :] = 0.0
+    source_transport[:, [0, -1], :] = 0.0
+    physical_local_terms[[0, -1], :, :] = 0.0
+    physical_local_terms[:, [0, -1], :] = 0.0
+    compatible_source[[0, -1], :, :] = 0.0
+    compatible_source[:, [0, -1], :] = 0.0
+    return source, source_transport, physical_local_terms, compatible_source
 
 
 def gu_emerson_equation63_terms(
@@ -586,8 +699,14 @@ def gu_emerson_equation63_terms(
     finite_volume_lhs = wall_bounded_face_divergence(
         *transformed_fluxes, x, y
     )
-    source = _compatible_equation63_source(
+    (
+        source,
+        source_transport,
+        physical_local_terms,
+        compatible_source,
+    ) = _compatible_equation63_source(
         physical,
+        packed,
         mu,
         closures,
         transformed_fluxes,
@@ -604,7 +723,16 @@ def gu_emerson_equation63_terms(
     finite_volume_lhs[:, [0, -1], :] = 0.0
     if not all(
         np.isfinite(value).all()
-        for value in (residual, finite_volume_lhs, central_lhs, source, physical_point)
+        for value in (
+            residual,
+            finite_volume_lhs,
+            central_lhs,
+            source,
+            source_transport,
+            physical_local_terms,
+            compatible_source,
+            physical_point,
+        )
     ):
         raise FloatingPointError("equation-(63) evaluation produced NaN or infinity")
     return GuEmersonEquation63Terms(
@@ -612,6 +740,9 @@ def gu_emerson_equation63_terms(
         finite_volume_lhs=finite_volume_lhs,
         central_point_lhs=central_lhs,
         source=source,
+        source_transport=source_transport,
+        physical_local_terms=physical_local_terms,
+        compatible_source=compatible_source,
         physical_point_residual=physical_point,
         gamma_by_slot=gamma,
     )
