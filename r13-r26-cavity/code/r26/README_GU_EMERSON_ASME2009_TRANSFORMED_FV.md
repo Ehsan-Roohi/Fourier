@@ -232,3 +232,21 @@ unintended interior overwrite and is close to, but does not improve on, the
 previous restart checkpoint `4.433743e-3`.  It is therefore an algorithmic
 ownership correction rather than a convergence claim.  N8 still fails the
 `1e-8` gate and N16 remains blocked.
+
+A separate N8-only monolithic oracle now tests whether replacing the
+segregated iteration by Newton--Krylov resolves the stall.  Its square raw
+system uses equation (63) on every interior row, retains the physical
+wall/corner equations, and preserves the global mass border.  Logarithmic
+density and temperature coordinates enforce positivity.  It is diagnostic
+only and cannot authorize N16 or production output.
+
+Starting from the best 24-sweep transformed checkpoint, the raw monolithic
+objective is `5.362940e-3`.  Eight bounded JFNK outer iterations use 277
+residual evaluations; every trial is worse, rising first to `6.268060e-3` and
+ending at `6.516780e-3`.  The fail-closed oracle therefore returns its initial
+checkpoint (transformed residual `5.362940e-3`, complete physical raw gate
+`5.364705e-3`, held continuity `-1.865038e-5`, mass error at roundoff).  This
+rules out both more fixed-point sweeps and an unpreconditioned monolithic JFNK
+swap as useful next steps.  It does not prove that the discrete system has no
+root; the remaining defensible work is an equation/boundary audit or a
+physics-based block preconditioner, still on N8 only.
