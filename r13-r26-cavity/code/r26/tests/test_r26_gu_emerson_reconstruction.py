@@ -18,11 +18,15 @@ from r26_gu_emerson_reconstruction import (
     GuEmersonReconstructionOptions,
     _SegregatedReconstructionOperators,
     _anderson_candidate,
+    _copy_boundary_values,
     make_gu_emerson_reconstruction_problem,
     solve_gu_emerson_reconstruction,
 )
 from r26_gu_emerson_saturne_contract import saturne_carrier_evidence
-from r26_gu_emerson_variables import gu_emerson_fields_from_state
+from r26_gu_emerson_variables import (
+    gu_emerson_fields_from_state,
+    state_from_gu_emerson_fields,
+)
 
 
 def test_reconstruction_controls_are_complete_and_explicitly_nonpaper() -> None:
@@ -111,6 +115,41 @@ def test_depth_one_anderson_affine_mix_minimizes_opposite_residuals() -> None:
     assert used
     assert current_weight == 0.5
     np.testing.assert_allclose(candidate, 0.5 * (first + second))
+
+
+def test_wall_copy_preserves_every_interior_primary_value() -> None:
+    interior = np.arange(5 * 5 * 3, dtype=float).reshape(5, 5, 3)
+    boundary = -np.ones_like(interior)
+    copied = _copy_boundary_values(interior, boundary)
+    np.testing.assert_array_equal(copied[1:-1, 1:-1], interior[1:-1, 1:-1])
+    assert np.all(copied[0] == -1.0)
+    assert np.all(copied[-1] == -1.0)
+    assert np.all(copied[:, 0] == -1.0)
+    assert np.all(copied[:, -1] == -1.0)
+    np.testing.assert_array_equal(interior, np.arange(75).reshape(5, 5, 3))
+
+
+def test_wall_stage_owns_only_transformed_boundary_nodes() -> None:
+    case = gu_asme2009_cavity_case(5, kn=0.1, lid_speed_m_per_s=10.0)
+    state = case.equilibrium_state()
+    fields = gu_emerson_fields_from_state(
+        state, x=case.x, y=case.y, mu=case.mu(state[..., 3])
+    )
+    options = GuEmersonReconstructionOptions.asme2009_equation63_safeguarded_n8(
+        max_outer_iterations=1
+    )
+    operators = _SegregatedReconstructionOperators(
+        make_gu_emerson_reconstruction_problem(case), options
+    )
+    physical = state_from_gu_emerson_fields(
+        fields, x=case.x, y=case.y, mu=case.mu(fields.theta)
+    )
+    updated = operators.update_wall_boundaries(physical, fields)
+    for name in ("rho", "velocity", "theta", "g", "h", "omega", "gamma", "chi"):
+        np.testing.assert_array_equal(
+            np.asarray(getattr(updated, name))[1:-1, 1:-1],
+            np.asarray(getattr(fields, name))[1:-1, 1:-1],
+        )
 
 
 def test_zero_lid_equilibrium_survives_one_complete_published_order_sweep() -> None:

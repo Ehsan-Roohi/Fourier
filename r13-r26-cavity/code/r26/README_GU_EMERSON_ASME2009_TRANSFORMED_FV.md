@@ -216,3 +216,19 @@ a clean best-state restart, 24 more sweeps still did not improve the first
 the solver.  The next N8 stage is therefore the wall-reconstruction/closure
 coupling that injects the slot-16 defect, not more relaxation, restarts, or
 grid refinement.  N16 remains blocked.
+
+The wall reconstruction ownership audit found that the physical-to-transformed
+conversion at the end of a sweep rewrote every interior primary field.  This
+was especially consequential for `chi`, whose inverse contains a heat-flux
+divergence: changing wall heat flux changes the adjacent gradient even though
+the interior `chi` block has already been solved.  The wall stage now owns only
+boundary values of the eight Gu--Emerson primary fields.  A bounded boundary
+fit reconstructs the relaxed physical wall target while preserving every
+interior transformed value exactly.
+
+All 170 tests pass.  On the fresh N8 gate the best 24-sweep raw residual is
+`5.364705e-3` at sweep 23 (the final sweep is `1.082937e-2`).  This removes the
+unintended interior overwrite and is close to, but does not improve on, the
+previous restart checkpoint `4.433743e-3`.  It is therefore an algorithmic
+ownership correction rather than a convergence claim.  N8 still fails the
+`1e-8` gate and N16 remains blocked.

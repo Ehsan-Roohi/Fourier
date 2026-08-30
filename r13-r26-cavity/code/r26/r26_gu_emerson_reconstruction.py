@@ -586,6 +586,81 @@ def _local_block_sparsity(nodes: int, components: int, radius: int) -> csc_matri
     return coo_matrix((data, (rows, cols)), shape=(count, count)).tocsc()
 
 
+def _copy_boundary_values(
+    interior_owned: np.ndarray, boundary_owned: np.ndarray
+) -> np.ndarray:
+    """Copy only boundary nodes while preserving every interior primary value."""
+
+    interior = np.asarray(interior_owned, dtype=float)
+    boundary = np.asarray(boundary_owned, dtype=float)
+    if interior.shape != boundary.shape or interior.ndim < 2:
+        raise ValueError("primary fields must have matching two-dimensional grids")
+    result = interior.copy()
+    result[0, ...] = boundary[0, ...]
+    result[-1, ...] = boundary[-1, ...]
+    result[:, 0, ...] = boundary[:, 0, ...]
+    result[:, -1, ...] = boundary[:, -1, ...]
+    return result
+
+
+def _replace_transformed_boundary_values(
+    fields: GuEmersonFields, wall_fields: GuEmersonFields
+) -> GuEmersonFields:
+    """Keep solved interior Gu--Emerson fields and replace only wall nodes."""
+
+    return replace(
+        fields,
+        **{
+            name: _copy_boundary_values(
+                np.asarray(getattr(fields, name)),
+                np.asarray(getattr(wall_fields, name)),
+            )
+            for name in (
+                "rho",
+                "velocity",
+                "theta",
+                "g",
+                "h",
+                "omega",
+                "gamma",
+                "chi",
+            )
+        },
+    )
+
+
+def _fit_transformed_boundary_values(
+    fields: GuEmersonFields,
+    target_state: np.ndarray,
+    *,
+    x: np.ndarray,
+    y: np.ndarray,
+    viscosity: Callable[[np.ndarray], np.ndarray],
+    iterations: int = 8,
+) -> GuEmersonFields:
+    """Fit wall primaries without changing any transformed interior unknown."""
+
+    fitted = fields
+    target = np.asarray(target_state, dtype=float)
+    for _ in range(iterations):
+        reconstructed = state_from_gu_emerson_fields(
+            fitted, x=x, y=y, mu=viscosity(fitted.theta)
+        )
+        boundary_target = reconstructed.copy()
+        boundary_target[0, ...] = target[0, ...]
+        boundary_target[-1, ...] = target[-1, ...]
+        boundary_target[:, 0, ...] = target[:, 0, ...]
+        boundary_target[:, -1, ...] = target[:, -1, ...]
+        wall_fields = gu_emerson_fields_from_state(
+            boundary_target,
+            x=x,
+            y=y,
+            mu=viscosity(boundary_target[..., 3]),
+        )
+        fitted = _replace_transformed_boundary_values(fitted, wall_fields)
+    return fitted
+
+
 class _SegregatedReconstructionOperators:
     """State-free callbacks used by the published-order driver."""
 
@@ -1158,11 +1233,12 @@ class _SegregatedReconstructionOperators:
         if np.any(state[..., 0] <= 0.0) or np.any(state[..., 3] <= 0.0):
             raise FloatingPointError("bilinear corner reconstruction violated positivity")
         self.completed_sweeps += 1
-        return gu_emerson_fields_from_state(
+        return _fit_transformed_boundary_values(
+            fields,
             state,
             x=case.x,
             y=case.y,
-            mu=case.mu(state[..., 3]),
+            viscosity=case.mu,
         )
 
     @property
