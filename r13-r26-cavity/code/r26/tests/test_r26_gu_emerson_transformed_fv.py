@@ -93,7 +93,7 @@ def test_asme_equation63_uses_every_printed_diffusion_multiplier() -> None:
     assert gamma[16] == 3.0 / 7.0
 
 
-def test_equation62_source_is_direct_while_other_rows_remain_fv_compatible() -> None:
+def test_equation63_sources_are_central_not_cubista_flux_differences() -> None:
     case, fields = _smooth_asme_fields()
     terms = gu_emerson_equation63_terms(fields, case=case)
     physical = state_from_gu_emerson_fields(
@@ -109,24 +109,20 @@ def test_equation62_source_is_direct_while_other_rows_remain_fv_compatible() -> 
         case.mu(fields.theta),
         case=case,
     )
-    np.testing.assert_allclose(
-        terms.residual[1:-1, 1:-1, :16],
-        physical_fv[1:-1, 1:-1, :16],
-        rtol=0.0,
-        atol=3.0e-13,
-    )
-    np.testing.assert_allclose(
-        terms.source[..., :16],
-        terms.compatible_source[..., :16],
-        rtol=0.0,
-        atol=2.0e-15,
-    )
-    assert np.max(
+    source_difference = np.max(
         np.abs(
-            terms.source[1:-1, 1:-1, 16]
-            - terms.compatible_source[1:-1, 1:-1, 16]
-        )
-    ) > 1.0e-10
+            terms.source[1:-1, 1:-1]
+            - terms.compatible_source[1:-1, 1:-1]
+        ),
+        axis=(0, 1),
+    )
+    assert source_difference[0] == 0.0
+    assert source_difference[1] > 1.0e-6
+    assert source_difference[4] > 1.0e-5
+    assert source_difference[16] > 1.0e-7
+    assert np.max(
+        np.abs(terms.residual[1:-1, 1:-1] - physical_fv[1:-1, 1:-1])
+    ) > 1.0e-5
     assert np.max(np.abs(terms.source[..., 1:])) > 0.0
     assert np.max(np.abs(terms.finite_volume_lhs[1:-1, 1:-1, 1:])) > 0.0
     assert np.array_equal(terms.residual[0], np.zeros_like(terms.residual[0]))
@@ -151,7 +147,7 @@ def test_picard_stage_matches_nonlinear_residual_at_freeze_point() -> None:
     )
     np.testing.assert_allclose(residual, terms.residual, rtol=0.0, atol=2.0e-15)
     np.testing.assert_allclose(
-        terms.compatible_source,
+        terms.source,
         terms.source_transport - terms.physical_local_terms,
         rtol=0.0,
         atol=2.0e-15,

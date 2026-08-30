@@ -403,8 +403,8 @@ class GuEmersonReconstructionOptions:
                     )
                     if self.use_rana_source_history
                     else (
-                        "direct equation-(63) conservative sources with the "
-                        "equation-(62) bracket centrally differenced; "
+                        "direct equation-(63) conservative source fluxes "
+                        "centrally differenced for equations (56)--(62); "
                         "printed linear collision sinks implicit; remaining "
                         "source, viscosity and mass flux frozen within each "
                         "sequential field block"
