@@ -20,6 +20,40 @@ from r26_state import NVAR
 SQRT_2_OVER_PI: Final[float] = float(np.sqrt(2.0 / np.pi))
 
 
+@dataclass(frozen=True)
+class GuASME2009CavityContract:
+    """Source-locked dimensional data for the published driven cavity.
+
+    Gu, John, Tang & Emerson, ASME MNHMT2009-18236, explicitly print every
+    value below except ``length_m``.  The paper fixes ``Kn=lambda/L`` so the
+    nondimensional solution does not require a dimensional ``L``.  The
+    50-micrometre length is retained only as the project's declared THOR
+    comparison scale and is never attributed to the ASME paper.
+    """
+
+    gas: str = "argon"
+    reference_temperature_K: float = 273.0
+    reference_viscosity_Pa_s: float = 21.25e-6
+    sutherland_temperature_K: float = 144.0
+    gas_constant_J_kg_K: float = 208.0
+    accommodation: float = 1.0
+    published_grid_points: int = 100
+    published_lid_speeds_m_s: tuple[float, float] = (10.0, 100.0)
+    published_knudsen_numbers: tuple[float, ...] = (0.05, 0.1, 0.2, 0.5)
+    project_comparison_length_m: float = 5.0e-5
+    length_provenance: str = (
+        "project THOR benchmark declaration; the ASME paper leaves L symbolic"
+    )
+    paper: str = (
+        "Gu--John--Tang--Emerson, ASME MNHMT2009-18236, Eqs. (35)--(36)"
+    )
+
+
+GU_ASME2009_CAVITY_CONTRACT: Final[GuASME2009CavityContract] = (
+    GuASME2009CavityContract()
+)
+
+
 class KnudsenConvention(str, Enum):
     """Supported definitions of the input Knudsen number."""
 
@@ -325,6 +359,7 @@ def gu_asme2009_cavity_case(
     values remain possible for sensitivity studies but are named explicitly.
     """
 
+    contract = GU_ASME2009_CAVITY_CONTRACT
     kn_value = float(kn)
     lid_star = lid_speed_m_per_s / np.sqrt(gas_constant_si * wall_temperature_K)
     mu_eq = equilibrium_mu_star(kn_value, KnudsenConvention.GU_MEAN_FREE_PATH)
@@ -336,7 +371,7 @@ def gu_asme2009_cavity_case(
         lid_velocity=float(lid_star),
         viscosity=ViscosityModel.gu_sutherland(
             reference_temperature_K=wall_temperature_K,
-            sutherland_temperature_K=144.0,
+            sutherland_temperature_K=contract.sutherland_temperature_K,
         ),
         scaling=collision_balanced_scaling(mu_eq),
         grid_stretch_beta=float(grid_stretch_beta),
@@ -344,8 +379,37 @@ def gu_asme2009_cavity_case(
         provenance=(
             "Gu--John--Tang--Emerson ASME HT2009-88293 driven cavity; "
             "Gu lambda/L Kn, source-locked ASME closure constants, "
-            "Sutherland mu0=21.25e-6 Pa s at 273 K, S=144 K"
+            "Sutherland mu0=21.25e-6 Pa s at 273 K, S=144 K; "
+            f"requested grid={nodes} points (paper grid={contract.published_grid_points})"
         ),
+    )
+
+
+def gu_asme2009_published_cavity_case(
+    *,
+    kn: float,
+    lid_speed_m_per_s: float = 10.0,
+) -> CavityCase:
+    """Return the literal 100x100 ASME-2009 published cavity configuration.
+
+    This constructor rejects off-paper Knudsen numbers and lid speeds.  The
+    lower-grid constructor above remains available only for numerical gates.
+    """
+
+    contract = GU_ASME2009_CAVITY_CONTRACT
+    kn_value = float(kn)
+    speed = float(lid_speed_m_per_s)
+    if kn_value not in contract.published_knudsen_numbers:
+        raise ValueError("published ASME cavity Kn must be 0.05, 0.1, 0.2, or 0.5")
+    if speed not in contract.published_lid_speeds_m_s:
+        raise ValueError("published ASME cavity lid speed must be 10 or 100 m/s")
+    return gu_asme2009_cavity_case(
+        contract.published_grid_points,
+        kn=kn_value,
+        lid_speed_m_per_s=speed,
+        gas_constant_si=contract.gas_constant_J_kg_K,
+        wall_temperature_K=contract.reference_temperature_K,
+        grid_stretch_beta=0.0,
     )
 
 

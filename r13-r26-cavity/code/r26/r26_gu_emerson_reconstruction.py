@@ -2,10 +2,11 @@
 """Documented field-by-field reconstruction of Gu--Emerson Sec. 5.2.
 
 This is deliberately *not* described as the unavailable THOR source code.
-It executes the printed Gu--Emerson field order and uses the repository's
-audited R26 equations as the defect oracle.  Numerical details that are not
-printed in the paper are fixed below, reported in every result, and called a
-reconstruction:
+It executes the printed Gu--Emerson field order.  Two explicitly named
+equation backends are available: the historical physical-balance-defect
+reconstruction and a direct finite-volume discretization of equation (63) in
+``g,h,omega,gamma,chi``.  Numerical details that are not printed in the paper
+are fixed below, reported in every result, and called a reconstruction:
 
 * one coloured field-family defect matrix per fixed Picard refresh cycle;
 * SuperLU sparse direct block solves (LSMR only if a block is singular);
@@ -15,9 +16,9 @@ reconstruction:
 * the repository's declared bilinear sharp-corner extension.
 
 No global Newton, Krylov, homotopy, pseudo-arclength, clipping, filtering, or
-Tikhonov row occurs in this module.  Acceptance is based only on the complete
-unscaled physical R26 boundary-value residual, the held continuity equation,
-mass, and positivity.
+Tikhonov row occurs in this module.  Direct equation-(63) acceptance requires
+both its transformed finite-volume residual and the complete unscaled physical
+R26 boundary-value residual, together with held continuity, mass and positivity.
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ from r26_gu_emerson_variables import (
     gu_emerson_fields_from_state,
     state_from_gu_emerson_fields,
 )
+from r26_gu_emerson_transformed_fv import gu_emerson_transformed_fv_residual
 from r26_state import planar_state_to_tensors
 from r26_tensor_closures import closures_from_tensors, finite_difference_gradients
 from r26_thor_solver import _pressure_correction_matrix
@@ -120,6 +122,10 @@ PressureDensityCoupling = Literal[
     "legacy_direct_mass_constrained",
     "code_saturne_v5_lagged_total_pressure_diagnostic",
 ]
+EquationBackend = Literal[
+    "physical-balance-defect",
+    "equation63-transformed-fv",
+]
 
 
 @dataclass(frozen=True)
@@ -150,6 +156,39 @@ class GuEmersonReconstructionOptions:
         "legacy_direct_mass_constrained"
     )
     density_property_relaxation: float = RANA_THERMOPHYSICAL_HISTORY_RELAXATION
+    equation_backend: EquationBackend = "physical-balance-defect"
+
+    @classmethod
+    def asme2009_equation63_source_backed(
+        cls, **overrides: object
+    ) -> "GuEmersonReconstructionOptions":
+        """Return the direct transformed-PDE profile for ASME reproduction.
+
+        The equation backend, field order, CUBISTA, central terms, SIMPLE and
+        Rhie--Chow are fixed by Gu--Emerson.  The paper does not print
+        relaxation values; the only available source-backed values are the
+        steady Code_Saturne v5.0.3 defaults (0.7 fields, 0.3 pressure).  This
+        method uses those values without importing Rana source histories or
+        its lagged thermophysical-density carrier.
+        """
+
+        values: dict[str, object] = {
+            "equation_backend": "equation63-transformed-fv",
+            "matrix_refresh_interval": 1,
+            "velocity_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "pressure_relaxation": CODE_SATURNE_V5_STEADY_PRESSURE_RELAXATION,
+            "temperature_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "g_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "h_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "omega_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "gamma_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "chi_relaxation": CODE_SATURNE_V5_STEADY_FIELD_RELAXATION,
+            "wall_relaxation": 1.0,
+            "use_rana_source_history": False,
+            "pressure_density_coupling": "legacy_direct_mass_constrained",
+        }
+        values.update(overrides)
+        return cls(**values)
 
     @classmethod
     def code_saturne_v5_rana_diagnostic(
@@ -209,6 +248,18 @@ class GuEmersonReconstructionOptions:
             "code_saturne_v5_lagged_total_pressure_diagnostic",
         ):
             raise ValueError("unknown pressure-density coupling")
+        if self.equation_backend not in (
+            "physical-balance-defect",
+            "equation63-transformed-fv",
+        ):
+            raise ValueError("unknown Gu--Emerson equation backend")
+        if (
+            self.equation_backend == "equation63-transformed-fv"
+            and self.use_rana_source_history
+        ):
+            raise ValueError(
+                "direct equation-(63) sources cannot be replaced by Rana source history"
+            )
         if not (
             np.isfinite(self.density_property_relaxation)
             and 0.0 < self.density_property_relaxation <= 1.0
@@ -232,6 +283,7 @@ class GuEmersonReconstructionOptions:
             self.pressure_density_coupling
             == "code_saturne_v5_lagged_total_pressure_diagnostic"
         )
+        direct_equation63 = self.equation_backend == "equation63-transformed-fv"
         relaxation_source = (
             (
                 "Code_Saturne v5.0.3 iniini.f90/modini.f90 at commit "
@@ -239,7 +291,12 @@ class GuEmersonReconstructionOptions:
                 "SHA-256 a01d309692acf26093c65aa4c11453afc07f3f98b7be1bb8f2c1ea7ba2e44d5d"
             )
             if saturne_carrier
-            else tag
+            else (
+                "Code_Saturne v5.0.3 steady defaults at commit "
+                f"{CODE_SATURNE_V5_COMMIT}; Gu--Emerson does not print relaxation values"
+                if direct_equation63
+                else tag
+            )
         )
         controls = {
             "linear_solver": NumericalControlSource(
@@ -264,7 +321,12 @@ class GuEmersonReconstructionOptions:
                         "collision/diffusion retained in coloured field matrices"
                     )
                     if self.use_rana_source_history
-                    else "Gu--Emerson field defect with no transferred Rana source history"
+                    else (
+                        "direct equation-(63) central source identity from audited "
+                        "Gu--Emerson physical equations"
+                        if direct_equation63
+                        else "Gu--Emerson field defect with no transferred Rana source history"
+                    )
                 ),
                 (
                     (
@@ -310,6 +372,7 @@ class GuEmersonReconstructionOptions:
 class GuEmersonSweepRecord:
     outer_iteration: int
     raw_gate: float
+    transformed_equation63_linf: float
     scaled_linf: float
     held_continuity: float
     mass_error: float
@@ -556,8 +619,13 @@ class _SegregatedReconstructionOperators:
 
     def _bulk_stage_residual(self, fields: GuEmersonFields, slots: tuple[int, ...]) -> np.ndarray:
         state = self._physical(fields)
-        mu = self.problem.case.mu(state[..., 3])
-        raw = self.problem._bulk(state, mu)
+        if self.options.equation_backend == "equation63-transformed-fv":
+            raw = gu_emerson_transformed_fv_residual(
+                fields, case=self.problem.case
+            )
+        else:
+            mu = self.problem.case.mu(state[..., 3])
+            raw = self.problem._bulk(state, mu)
         self.residual_evaluations += 1
         if self.uses_saturne_carrier and any(slot in (1, 2) for slot in slots):
             raw[..., 1:3] += self._saturne_pressure_momentum_correction(state)
@@ -940,9 +1008,24 @@ def solve_gu_emerson_reconstruction(
         fields = sweep.fields
         state = sweep.physical_state
         raw, diagnostics, positive = _gate(problem, state)
+        transformed_linf = (
+            float(
+                np.max(
+                    np.abs(
+                        gu_emerson_transformed_fv_residual(
+                            fields, case=problem.case
+                        )[1:-1, 1:-1]
+                    ),
+                    initial=0.0,
+                )
+            )
+            if options.equation_backend == "equation63-transformed-fv"
+            else float("nan")
+        )
         record = GuEmersonSweepRecord(
             outer_iteration=outer,
             raw_gate=raw,
+            transformed_equation63_linf=transformed_linf,
             scaled_linf=diagnostics.total_linf,
             held_continuity=diagnostics.held_out_continuity,
             mass_error=diagnostics.mass_error,
@@ -956,13 +1039,22 @@ def solve_gu_emerson_reconstruction(
         converged = bool(
             positive
             and raw <= options.raw_tolerance
+            and (
+                options.equation_backend != "equation63-transformed-fv"
+                or transformed_linf <= options.raw_tolerance
+            )
             and diagnostics.total_linf <= options.scaled_tolerance
             and abs(diagnostics.held_out_continuity)
             <= options.held_continuity_tolerance
             and abs(diagnostics.mass_error) <= options.mass_tolerance
         )
         if converged:
-            message = "complete raw R26 gate reached by published-order reconstruction"
+            message = (
+                "direct equation-(63) and complete raw physical R26 gates reached "
+                "by published-order transformed-variable solve"
+                if options.equation_backend == "equation63-transformed-fv"
+                else "complete raw R26 gate reached by published-order reconstruction"
+            )
             break
 
     return GuEmersonReconstructionResult(
@@ -985,6 +1077,7 @@ __all__ = [
     "CODE_SATURNE_V5_COMMIT",
     "CODE_SATURNE_V5_STEADY_FIELD_RELAXATION",
     "CODE_SATURNE_V5_STEADY_PRESSURE_RELAXATION",
+    "EquationBackend",
     "FIELD_SLOTS",
     "GU_EMERSON_RECONSTRUCTION_PROVENANCE",
     "RANA_THERMOPHYSICAL_HISTORY_RELAXATION",
