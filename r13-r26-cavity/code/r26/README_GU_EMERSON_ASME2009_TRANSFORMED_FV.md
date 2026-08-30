@@ -16,7 +16,8 @@ The direct backend uses the structure printed in section 5.2:
 - collocated finite volumes;
 - CUBISTA convection of each transformed field;
 - central face diffusion with the printed `mu/Gamma_Phi` coefficients;
-- central source evaluation from the audited R26 tensor equations;
+- conservative discretization of every printed RHS flux in equations
+  (56)--(62), with only collision/nonlinear local terms evaluated centrally;
 - segregated Picard linearisation: source, viscosity and mass flux are frozen
   at the entry to each field block and rebuilt before the next printed field;
 - the dissipative linear collision sinks printed in equations (58)--(62) are
@@ -25,15 +26,15 @@ The direct backend uses the structure printed in section 5.2:
 - the printed segregated order `u -> SIMPLE -> T -> g -> h -> omega -> gamma
   -> chi -> physical moments -> wall conditions`.
 
-The long right-hand sides of equations (58)--(62) are not copied by hand.
-For auditability the source is formed by the exact central identity
-
-`S_Phi = LHS_central(Phi) - R_physical_point(Phi)`.
-
-Here `R_physical_point` is the independently tested pointwise R26 equation,
-not the physical finite-volume defect.  Consequently the actual solved
-residual is `LHS_FV_equation63 - S_Phi`, and the transformed block can be
-tested to prove that it never calls the physical FV balance operator.
+The long right-hand sides of equations (58)--(62) are represented in their
+printed conservative flux form.  Each RHS divergence is the difference
+between the transformed equation-(63) flux and the reconstructed
+physical-moment flux; the local `Sigma,Q,M,S,N` and collision terms remain
+explicitly evaluated.  This uses the same CUBISTA faces, wall-bounded control
+volumes and physical-wall fluxes on both sides, but it never calls the
+physical BVP residual from a transformed field block.  A manufactured
+non-equilibrium test independently verifies that all interior transformed
+rows reproduce the compatible physical FV rows to `3e-13`.
 
 ## Literal ASME cavity contract
 
@@ -76,7 +77,8 @@ retains the dissipative collision terms on the block diagonal, and obtains
 SIMPLE continuity from the direct transformed backend rather than the physical
 finite-volume acceptance operator.
 
-The corrected local N8 diagnostic at `Kn=0.1`, `U=10 m/s` still fails closed.
+Before the RHS flux discretization was made compatible, the corrected local
+N8 diagnostic at `Kn=0.1`, `U=10 m/s` failed closed.
 With the public Code_Saturne steady field/pressure defaults (`0.7`, `0.3`) and
 an unrelaxed post-sweep wall update, the complete physical raw gate grows from
 `1.46877e-1` to `4.53504` in eight sweeps.  A declared local wall correction of
@@ -106,9 +108,9 @@ that the next defect to resolve is the transformed-to-physical reconstruction
 consistency near the interior chi/velocity rows, not wall enforcement.  N16
 remains blocked.
 
-Every sweep record now audits that separation directly on interior rows as
+Every sweep record audits that separation directly on interior rows as
 
-`R_63 = R_physical,point + (L_FV - L_central)`.
+`R_63 = R_physical,point + (L_FV - L_central) - (S_FV - S_central)`.
 
 For sweep 21, the three unscaled infinity norms are respectively
 `3.459903e-3`, `1.250344e-2`, and `1.250860e-2`; the identity closes to
@@ -116,6 +118,16 @@ For sweep 21, the three unscaled infinity norms are respectively
 cancellation between the physical point residual and the FV/central
 transport-discretization defect.  This is not evidence of a faulty variable
 inverse and it cannot pass the independent physical gate.  The new record
-fields expose both defects, their dominant planar-17 slots, and the identity
+fields expose the transport and source discretization defects, their dominant
+planar-17 slots, and the identity
 roundoff so subsequent source-discretization work cannot hide that
 cancellation behind a scalar transformed norm.
+
+The compatible RHS stage resolves that diagnosed defect.  In the new N8 run,
+the transformed and complete physical raw residuals become identical to
+roundoff once the interior bulk row dominates: at sweep 24 both are
+`6.349235e-3`, down from the initial physical gate `9.445238e-2`, and the best
+accepted state is the final sweep rather than an earlier cancellation point.
+The run remains fail-closed because `1e-8` has not been reached.  The next
+bounded step is therefore a longer N8 work budget/checkpoint run using these
+same equations; N16 remains unauthorized.

@@ -10,6 +10,7 @@ from r26_cases import (
     gu_asme2009_published_cavity_case,
 )
 from r26_discretization import R26NodeBVP
+from r26_fv_backend import thor_fv_bulk_residual
 from r26_gu_emerson_reconstruction import (
     GuEmersonReconstructionOptions,
     _SegregatedReconstructionOperators,
@@ -23,7 +24,10 @@ from r26_gu_emerson_transformed_fv import (
     gu_emerson_equation63_picard_residual,
     gu_emerson_equation63_terms,
 )
-from r26_gu_emerson_variables import gu_emerson_fields_from_state
+from r26_gu_emerson_variables import (
+    gu_emerson_fields_from_state,
+    state_from_gu_emerson_fields,
+)
 
 
 def _smooth_asme_fields(nodes: int = 7):
@@ -89,15 +93,27 @@ def test_asme_equation63_uses_every_printed_diffusion_multiplier() -> None:
     assert gamma[16] == 3.0 / 7.0
 
 
-def test_equation63_source_identity_is_exact_for_all_transformed_rows() -> None:
+def test_equation63_source_is_fv_compatible_for_all_transformed_rows() -> None:
     case, fields = _smooth_asme_fields()
     terms = gu_emerson_equation63_terms(fields, case=case)
-    reconstructed = terms.central_point_lhs - terms.source
+    physical = state_from_gu_emerson_fields(
+        fields,
+        x=case.x,
+        y=case.y,
+        mu=case.mu(fields.theta),
+    )
+    physical_fv = thor_fv_bulk_residual(
+        physical,
+        case.x,
+        case.y,
+        case.mu(fields.theta),
+        case=case,
+    )
     np.testing.assert_allclose(
-        reconstructed,
-        terms.physical_point_residual,
+        terms.residual[1:-1, 1:-1],
+        physical_fv[1:-1, 1:-1],
         rtol=0.0,
-        atol=2.0e-15,
+        atol=3.0e-13,
     )
     assert np.max(np.abs(terms.source[..., 1:])) > 0.0
     assert np.max(np.abs(terms.finite_volume_lhs[1:-1, 1:-1, 1:])) > 0.0
@@ -107,8 +123,10 @@ def test_equation63_source_identity_is_exact_for_all_transformed_rows() -> None:
     assert consistency.identity_roundoff < 2.0e-15
     assert consistency.physical_point_linf > 0.0
     assert consistency.transport_discretization_linf > 0.0
+    assert consistency.source_discretization_linf > 0.0
     assert 0 <= consistency.physical_point_argmax_slot < 17
     assert 0 <= consistency.transport_discretization_argmax_slot < 17
+    assert 0 <= consistency.source_discretization_argmax_slot < 17
 
 
 def test_picard_stage_matches_nonlinear_residual_at_freeze_point() -> None:
@@ -214,6 +232,7 @@ def test_direct_equation63_executes_the_complete_published_order() -> None:
     assert result.records[0].transformed_equation63_linf < 5.0e-14
     assert result.records[0].physical_point_linf < 5.0e-14
     assert result.records[0].transport_discretization_linf < 5.0e-14
+    assert result.records[0].source_discretization_linf < 5.0e-14
     assert result.records[0].equation63_identity_roundoff < 5.0e-14
     assert result.records[0].stage_order == (
         "velocity",

@@ -503,9 +503,11 @@ class GuEmersonSweepRecord:
     anderson_current_weight: float = 1.0
     physical_point_linf: float = float("nan")
     transport_discretization_linf: float = float("nan")
+    source_discretization_linf: float = float("nan")
     equation63_identity_roundoff: float = float("nan")
     physical_point_argmax_slot: int = -1
     transport_discretization_argmax_slot: int = -1
+    source_discretization_argmax_slot: int = -1
 
 
 @dataclass(frozen=True)
@@ -1197,9 +1199,11 @@ def _sweep_metrics(
         consistency = GuEmersonEquation63Consistency(
             physical_point_linf=float("nan"),
             transport_discretization_linf=float("nan"),
+            source_discretization_linf=float("nan"),
             identity_roundoff=float("nan"),
             physical_point_argmax_slot=-1,
             transport_discretization_argmax_slot=-1,
+            source_discretization_argmax_slot=-1,
         )
     normalized = [
         raw / options.raw_tolerance,
@@ -1427,10 +1431,16 @@ def solve_gu_emerson_reconstruction(
             transport_discretization_linf=(
                 consistency.transport_discretization_linf
             ),
+            source_discretization_linf=(
+                consistency.source_discretization_linf
+            ),
             equation63_identity_roundoff=consistency.identity_roundoff,
             physical_point_argmax_slot=consistency.physical_point_argmax_slot,
             transport_discretization_argmax_slot=(
                 consistency.transport_discretization_argmax_slot
+            ),
+            source_discretization_argmax_slot=(
+                consistency.source_discretization_argmax_slot
             ),
         )
         records.append(record)
