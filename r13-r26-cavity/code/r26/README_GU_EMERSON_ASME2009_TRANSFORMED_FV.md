@@ -105,3 +105,17 @@ returned only as a non-accepted diagnostic checkpoint.  This separation shows
 that the next defect to resolve is the transformed-to-physical reconstruction
 consistency near the interior chi/velocity rows, not wall enforcement.  N16
 remains blocked.
+
+Every sweep record now audits that separation directly on interior rows as
+
+`R_63 = R_physical,point + (L_FV - L_central)`.
+
+For sweep 21, the three unscaled infinity norms are respectively
+`3.459903e-3`, `1.250344e-2`, and `1.250860e-2`; the identity closes to
+`3.47e-18`.  The small transformed residual therefore contains a resolved
+cancellation between the physical point residual and the FV/central
+transport-discretization defect.  This is not evidence of a faulty variable
+inverse and it cannot pass the independent physical gate.  The new record
+fields expose both defects, their dominant planar-17 slots, and the identity
+roundoff so subsequent source-discretization work cannot hide that
+cancellation behind a scalar transformed norm.

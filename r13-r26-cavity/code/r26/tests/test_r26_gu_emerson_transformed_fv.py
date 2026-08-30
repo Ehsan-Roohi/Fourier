@@ -18,6 +18,7 @@ from r26_gu_emerson_reconstruction import (
 )
 from r26_gu_emerson_transformed_fv import (
     equation63_gamma_by_slot,
+    gu_emerson_equation63_consistency,
     gu_emerson_equation63_picard_data,
     gu_emerson_equation63_picard_residual,
     gu_emerson_equation63_terms,
@@ -102,6 +103,12 @@ def test_equation63_source_identity_is_exact_for_all_transformed_rows() -> None:
     assert np.max(np.abs(terms.finite_volume_lhs[1:-1, 1:-1, 1:])) > 0.0
     assert np.array_equal(terms.residual[0], np.zeros_like(terms.residual[0]))
     assert np.array_equal(terms.residual[-1], np.zeros_like(terms.residual[-1]))
+    consistency = gu_emerson_equation63_consistency(terms)
+    assert consistency.identity_roundoff < 2.0e-15
+    assert consistency.physical_point_linf > 0.0
+    assert consistency.transport_discretization_linf > 0.0
+    assert 0 <= consistency.physical_point_argmax_slot < 17
+    assert 0 <= consistency.transport_discretization_argmax_slot < 17
 
 
 def test_picard_stage_matches_nonlinear_residual_at_freeze_point() -> None:
@@ -205,6 +212,9 @@ def test_direct_equation63_executes_the_complete_published_order() -> None:
     assert result.converged
     assert result.records[0].raw_gate == 0.0
     assert result.records[0].transformed_equation63_linf < 5.0e-14
+    assert result.records[0].physical_point_linf < 5.0e-14
+    assert result.records[0].transport_discretization_linf < 5.0e-14
+    assert result.records[0].equation63_identity_roundoff < 5.0e-14
     assert result.records[0].stage_order == (
         "velocity",
         "simple_pressure_correction",

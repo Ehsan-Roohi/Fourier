@@ -77,6 +77,26 @@ class GuEmersonEquation63Terms:
 
 
 @dataclass(frozen=True)
+class GuEmersonEquation63Consistency:
+    """Interior decomposition of the transformed finite-volume residual.
+
+    The direct discretization satisfies
+
+    ``R_63 = R_physical,point + (L_FV - L_central)``.
+
+    The final term is a transport-discretization consistency defect, not a
+    reconstruction error.  Keeping it separate prevents cancellation between
+    the two right-hand terms from being mistaken for physical convergence.
+    """
+
+    physical_point_linf: float
+    transport_discretization_linf: float
+    identity_roundoff: float
+    physical_point_argmax_slot: int
+    transport_discretization_argmax_slot: int
+
+
+@dataclass(frozen=True)
 class GuEmersonEquation63PicardData:
     """Coefficients held fixed during one segregated field solve.
 
@@ -383,11 +403,40 @@ def gu_emerson_transformed_fv_residual(
     return gu_emerson_equation63_terms(fields, case=case).residual
 
 
+def gu_emerson_equation63_consistency(
+    terms: GuEmersonEquation63Terms,
+) -> GuEmersonEquation63Consistency:
+    """Audit the discrete/central decomposition on interior balance rows."""
+
+    interior = np.s_[1:-1, 1:-1]
+    physical = np.asarray(terms.physical_point_residual)[interior]
+    discretization = (
+        np.asarray(terms.finite_volume_lhs)
+        - np.asarray(terms.central_point_lhs)
+    )[interior]
+    closure = np.asarray(terms.residual)[interior] - physical - discretization
+    physical_by_slot = np.max(np.abs(physical), axis=(0, 1))
+    discretization_by_slot = np.max(np.abs(discretization), axis=(0, 1))
+    return GuEmersonEquation63Consistency(
+        physical_point_linf=float(np.max(physical_by_slot, initial=0.0)),
+        transport_discretization_linf=float(
+            np.max(discretization_by_slot, initial=0.0)
+        ),
+        identity_roundoff=float(np.max(np.abs(closure), initial=0.0)),
+        physical_point_argmax_slot=int(np.argmax(physical_by_slot)),
+        transport_discretization_argmax_slot=int(
+            np.argmax(discretization_by_slot)
+        ),
+    )
+
+
 __all__ = [
     "GU_EMERSON_TRANSFORMED_FV_PROVENANCE",
+    "GuEmersonEquation63Consistency",
     "GuEmersonEquation63PicardData",
     "GuEmersonEquation63Terms",
     "equation63_gamma_by_slot",
+    "gu_emerson_equation63_consistency",
     "gu_emerson_equation63_picard_data",
     "gu_emerson_equation63_picard_residual",
     "gu_emerson_equation63_terms",

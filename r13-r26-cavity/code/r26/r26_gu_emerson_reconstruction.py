@@ -58,9 +58,12 @@ from r26_gu_emerson_variables import (
     state_from_gu_emerson_fields,
 )
 from r26_gu_emerson_transformed_fv import (
+    GuEmersonEquation63Consistency,
     GuEmersonEquation63PicardData,
+    gu_emerson_equation63_consistency,
     gu_emerson_equation63_picard_data,
     gu_emerson_equation63_picard_residual,
+    gu_emerson_equation63_terms,
     gu_emerson_transformed_fv_residual,
 )
 from r26_state import planar_state_to_tensors
@@ -498,6 +501,11 @@ class GuEmersonSweepRecord:
     block_backtracking_trials: tuple[tuple[str, int], ...] = ()
     anderson_used: bool = False
     anderson_current_weight: float = 1.0
+    physical_point_linf: float = float("nan")
+    transport_discretization_linf: float = float("nan")
+    equation63_identity_roundoff: float = float("nan")
+    physical_point_argmax_slot: int = -1
+    transport_discretization_argmax_slot: int = -1
 
 
 @dataclass(frozen=True)
@@ -1167,24 +1175,32 @@ def _sweep_metrics(
     fields: GuEmersonFields,
     state: np.ndarray,
     options: GuEmersonReconstructionOptions,
-) -> tuple[float, object, bool, float, float]:
+) -> tuple[
+    float,
+    object,
+    bool,
+    float,
+    float,
+    GuEmersonEquation63Consistency,
+]:
     """Return every acceptance metric and their tolerance-normalized maximum."""
 
     raw, diagnostics, positive = _gate(problem, state)
-    transformed_linf = (
-        float(
-            np.max(
-                np.abs(
-                    gu_emerson_transformed_fv_residual(
-                        fields, case=problem.case
-                    )[1:-1, 1:-1]
-                ),
-                initial=0.0,
-            )
+    if options.equation_backend == "equation63-transformed-fv":
+        terms = gu_emerson_equation63_terms(fields, case=problem.case)
+        transformed_linf = float(
+            np.max(np.abs(terms.residual[1:-1, 1:-1]), initial=0.0)
         )
-        if options.equation_backend == "equation63-transformed-fv"
-        else float("nan")
-    )
+        consistency = gu_emerson_equation63_consistency(terms)
+    else:
+        transformed_linf = float("nan")
+        consistency = GuEmersonEquation63Consistency(
+            physical_point_linf=float("nan"),
+            transport_discretization_linf=float("nan"),
+            identity_roundoff=float("nan"),
+            physical_point_argmax_slot=-1,
+            transport_discretization_argmax_slot=-1,
+        )
     normalized = [
         raw / options.raw_tolerance,
         diagnostics.total_linf / options.scaled_tolerance,
@@ -1195,7 +1211,7 @@ def _sweep_metrics(
     if options.equation_backend == "equation63-transformed-fv":
         normalized.append(transformed_linf / options.raw_tolerance)
     merit = float(max(normalized)) if positive else float("inf")
-    return raw, diagnostics, positive, transformed_linf, merit
+    return raw, diagnostics, positive, transformed_linf, merit, consistency
 
 
 def _anderson_candidate(
@@ -1264,11 +1280,11 @@ def solve_gu_emerson_reconstruction(
     converged = False
     message = "bounded Gu--Emerson reconstruction work budget exhausted"
     baseline = _sweep_metrics(problem, fields, state, options)
-    accepted_merit_history = [baseline[-1]]
+    accepted_merit_history = [baseline[4]]
     best_state = state.copy()
     best_fields = fields
     best_outer_iteration = 0
-    best_merit = baseline[-1]
+    best_merit = baseline[4]
     map_state_history: list[np.ndarray] = []
     map_residual_history: list[np.ndarray] = []
 
@@ -1331,7 +1347,7 @@ def solve_gu_emerson_reconstruction(
                 metrics = _sweep_metrics(
                     problem, proposed_fields, proposed_state, options
                 )
-                while metrics[-1] > baseline_merit * (
+                while metrics[4] > baseline_merit * (
                     1.0 - options.outer_sufficient_decrease * accepted_step
                 ):
                     accepted_step *= options.outer_backtracking_factor
@@ -1351,6 +1367,7 @@ def solve_gu_emerson_reconstruction(
                             False,
                             float("inf"),
                             float("inf"),
+                            baseline[5],
                         )
                         continue
                     proposed_fields = gu_emerson_fields_from_state(
@@ -1382,7 +1399,7 @@ def solve_gu_emerson_reconstruction(
                 )
         fields = proposed_fields
         state = proposed_state
-        raw, diagnostics, positive, transformed_linf, merit = metrics
+        raw, diagnostics, positive, transformed_linf, merit, consistency = metrics
         record = GuEmersonSweepRecord(
             outer_iteration=outer,
             raw_gate=raw,
@@ -1406,6 +1423,15 @@ def solve_gu_emerson_reconstruction(
             ),
             anderson_used=anderson_used,
             anderson_current_weight=anderson_current_weight,
+            physical_point_linf=consistency.physical_point_linf,
+            transport_discretization_linf=(
+                consistency.transport_discretization_linf
+            ),
+            equation63_identity_roundoff=consistency.identity_roundoff,
+            physical_point_argmax_slot=consistency.physical_point_argmax_slot,
+            transport_discretization_argmax_slot=(
+                consistency.transport_discretization_argmax_slot
+            ),
         )
         records.append(record)
         if record_callback is not None:
