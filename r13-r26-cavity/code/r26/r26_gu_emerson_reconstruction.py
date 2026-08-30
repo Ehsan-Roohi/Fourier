@@ -57,7 +57,12 @@ from r26_gu_emerson_variables import (
     gu_emerson_fields_from_state,
     state_from_gu_emerson_fields,
 )
-from r26_gu_emerson_transformed_fv import gu_emerson_transformed_fv_residual
+from r26_gu_emerson_transformed_fv import (
+    GuEmersonEquation63PicardData,
+    gu_emerson_equation63_picard_data,
+    gu_emerson_equation63_picard_residual,
+    gu_emerson_transformed_fv_residual,
+)
 from r26_state import planar_state_to_tensors
 from r26_tensor_closures import closures_from_tensors, finite_difference_gradients
 from r26_thor_solver import _pressure_correction_matrix
@@ -323,7 +328,9 @@ class GuEmersonReconstructionOptions:
                     if self.use_rana_source_history
                     else (
                         "direct equation-(63) central source identity from audited "
-                        "Gu--Emerson physical equations"
+                        "Gu--Emerson physical equations; printed linear collision "
+                        "sinks implicit; remaining source, viscosity and mass flux "
+                        "frozen within each sequential field block"
                         if direct_equation63
                         else "Gu--Emerson field defect with no transferred Rana source history"
                     )
@@ -617,11 +624,22 @@ class _SegregatedReconstructionOperators:
                 + (1.0 - alpha) * self._source_history[..., list(slots)]
             )
 
-    def _bulk_stage_residual(self, fields: GuEmersonFields, slots: tuple[int, ...]) -> np.ndarray:
+    def _bulk_stage_residual(
+        self,
+        fields: GuEmersonFields,
+        slots: tuple[int, ...],
+        equation63_picard: GuEmersonEquation63PicardData | None = None,
+    ) -> np.ndarray:
         state = self._physical(fields)
         if self.options.equation_backend == "equation63-transformed-fv":
-            raw = gu_emerson_transformed_fv_residual(
-                fields, case=self.problem.case
+            raw = (
+                gu_emerson_transformed_fv_residual(fields, case=self.problem.case)
+                if equation63_picard is None
+                else gu_emerson_equation63_picard_residual(
+                    fields,
+                    case=self.problem.case,
+                    frozen=equation63_picard,
+                )
             )
         else:
             mu = self.problem.case.mu(state[..., 3])
@@ -652,6 +670,11 @@ class _SegregatedReconstructionOperators:
         base = packed.ravel()[full_indices].copy()
         logarithmic = stage == "temperature"
         encoded = np.log(base) if logarithmic else base
+        equation63_picard = None
+        if self.options.equation_backend == "equation63-transformed-fv":
+            equation63_picard = gu_emerson_equation63_picard_data(
+                fields, case=self.problem.case
+            )
 
         def with_vector(vector: np.ndarray) -> GuEmersonFields:
             value = np.exp(vector) if logarithmic else np.asarray(vector, dtype=float)
@@ -660,7 +683,9 @@ class _SegregatedReconstructionOperators:
             return gu_emerson_fields_from_planar17(candidate.reshape(packed.shape))
 
         def objective(vector: np.ndarray) -> np.ndarray:
-            return self._bulk_stage_residual(with_vector(vector), slots)
+            return self._bulk_stage_residual(
+                with_vector(vector), slots, equation63_picard
+            )
 
         residual = objective(encoded)
         if not np.isfinite(residual).all():
@@ -748,7 +773,11 @@ class _SegregatedReconstructionOperators:
         case = self.problem.case
         state = self._physical(fields)
         mu = case.mu(state[..., 3])
-        physical_continuity = self.problem._bulk(state, mu)[..., 0]
+        physical_continuity = (
+            gu_emerson_transformed_fv_residual(fields, case=case)[..., 0]
+            if self.options.equation_backend == "equation63-transformed-fv"
+            else self.problem._bulk(state, mu)[..., 0]
+        )
         self.residual_evaluations += 1
         continuity = physical_continuity
         if self.uses_saturne_carrier and self._simple_inverse_momentum_diagonal is not None:

@@ -18,6 +18,8 @@ from r26_gu_emerson_reconstruction import (
 )
 from r26_gu_emerson_transformed_fv import (
     equation63_gamma_by_slot,
+    gu_emerson_equation63_picard_data,
+    gu_emerson_equation63_picard_residual,
     gu_emerson_equation63_terms,
 )
 from r26_gu_emerson_variables import gu_emerson_fields_from_state
@@ -100,6 +102,52 @@ def test_equation63_source_identity_is_exact_for_all_transformed_rows() -> None:
     assert np.max(np.abs(terms.finite_volume_lhs[1:-1, 1:-1, 1:])) > 0.0
     assert np.array_equal(terms.residual[0], np.zeros_like(terms.residual[0]))
     assert np.array_equal(terms.residual[-1], np.zeros_like(terms.residual[-1]))
+
+
+def test_picard_stage_matches_nonlinear_residual_at_freeze_point() -> None:
+    case, fields = _smooth_asme_fields()
+    terms = gu_emerson_equation63_terms(fields, case=case)
+    frozen = gu_emerson_equation63_picard_data(fields, case=case)
+    residual = gu_emerson_equation63_picard_residual(
+        fields, case=case, frozen=frozen
+    )
+    np.testing.assert_allclose(residual, terms.residual, rtol=0.0, atol=2.0e-15)
+
+
+def test_picard_stage_holds_source_and_transport_data_fixed() -> None:
+    case, fields = _smooth_asme_fields()
+    frozen = gu_emerson_equation63_picard_data(fields, case=case)
+    source_before = frozen.explicit_source.copy()
+    sink_before = frozen.implicit_sink_by_slot.copy()
+    mass_x_before = frozen.mass_x.copy()
+    mass_y_before = frozen.mass_y.copy()
+    changed_velocity = np.asarray(fields.velocity).copy()
+    changed_velocity[2:-2, 2:-2, 0] += 1.0e-4
+    changed = replace(fields, velocity=changed_velocity)
+    residual = gu_emerson_equation63_picard_residual(
+        changed, case=case, frozen=frozen
+    )
+    assert np.isfinite(residual).all()
+    assert np.array_equal(frozen.explicit_source, source_before)
+    assert np.array_equal(frozen.implicit_sink_by_slot, sink_before)
+    assert np.array_equal(frozen.mass_x, mass_x_before)
+    assert np.array_equal(frozen.mass_y, mass_y_before)
+    assert np.max(np.abs(residual[..., 1:3])) > 0.0
+
+
+def test_printed_collision_sinks_are_implicit_only_for_high_moments() -> None:
+    case, fields = _smooth_asme_fields()
+    frozen = gu_emerson_equation63_picard_data(fields, case=case)
+    sink = frozen.implicit_sink_by_slot
+    assert np.array_equal(sink[..., :4], np.zeros_like(sink[..., :4]))
+    assert np.all(sink[..., 4:17] > 0.0)
+    ratio = sink / np.where(sink[..., 6:9].mean(axis=-1, keepdims=True) > 0.0,
+                            sink[..., 6:9].mean(axis=-1, keepdims=True), 1.0)
+    np.testing.assert_allclose(ratio[..., 4:6], 2.0 / 3.0)
+    np.testing.assert_allclose(ratio[..., 6:9], 1.0)
+    np.testing.assert_allclose(ratio[..., 9:12], 7.0 / 6.0)
+    np.testing.assert_allclose(ratio[..., 12:16], 3.0 / 2.0)
+    np.testing.assert_allclose(ratio[..., 16], 2.0 / 3.0)
 
 
 def test_equation63_equilibrium_is_an_exact_conservative_fixed_point() -> None:

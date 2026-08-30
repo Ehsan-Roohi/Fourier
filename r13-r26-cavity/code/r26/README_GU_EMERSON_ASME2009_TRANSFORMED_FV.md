@@ -17,6 +17,10 @@ The direct backend uses the structure printed in section 5.2:
 - CUBISTA convection of each transformed field;
 - central face diffusion with the printed `mu/Gamma_Phi` coefficients;
 - central source evaluation from the audited R26 tensor equations;
+- segregated Picard linearisation: source, viscosity and mass flux are frozen
+  at the entry to each field block and rebuilt before the next printed field;
+- the dissipative linear collision sinks printed in equations (58)--(62) are
+  retained on the implicit block diagonal;
 - SIMPLE pressure--velocity correction and Rhie--Chow mass fluxes;
 - the printed segregated order `u -> SIMPLE -> T -> g -> h -> omega -> gamma
   -> chi -> physical moments -> wall conditions`.
@@ -64,12 +68,22 @@ source-term linearisation, exact Rhie--Chow coefficient, sharp-corner rule or
 residual thresholds.  The direct profile therefore discloses every external
 control.  It does not claim to reproduce the unavailable private THOR code.
 
-A local N8 diagnostic at `Kn=0.1`, `U=10 m/s` showed that applying the public
-Code_Saturne steady defaults (`0.7` fields, `0.3` pressure) together with an
-unrelaxed post-sweep wall update is not stable for this independent solver:
-the physical raw residual grew from `1.47e-1` to `1.52` in eight sweeps.  A
-wall-relaxation sensitivity was diagnostic only and is not promoted as a
-paper control.  Therefore neither the literal `100 x 100` case nor the
-`100 m/s` case is authorized by this branch until a source-backed treatment
-of the unpublished controls passes reduced-grid transformed and physical
-gates.
+The numerical block Jacobian previously differentiated the right-hand side
+together with the transported field, cancelling much of the intended implicit
+convection--diffusion operator.  The direct backend now freezes the remaining
+right-hand side and transport coefficients within each printed field block,
+retains the dissipative collision terms on the block diagonal, and obtains
+SIMPLE continuity from the direct transformed backend rather than the physical
+finite-volume acceptance operator.
+
+The corrected local N8 diagnostic at `Kn=0.1`, `U=10 m/s` still fails closed.
+With the public Code_Saturne steady field/pressure defaults (`0.7`, `0.3`) and
+an unrelaxed post-sweep wall update, the complete physical raw gate grows from
+`1.46877e-1` to `4.53504` in eight sweeps.  A declared local wall correction of
+`0.25` reduces the gate from `9.44524e-2` to a best `1.92932e-2` at sweep 9,
+but the envelope subsequently grows to `8.95927e-2` at sweep 20.  Stage-wise
+instrumentation identifies the explicit `T -> chi` source coupling as the
+largest transient defect.  These controls are diagnostic only and are not
+promoted as paper values.  N16 and all production grids remain unauthorized
+until both the transformed and complete physical N8 gates contract to their
+declared tolerances.

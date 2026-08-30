@@ -76,6 +76,29 @@ class GuEmersonEquation63Terms:
     provenance: str = GU_EMERSON_TRANSFORMED_FV_PROVENANCE
 
 
+@dataclass(frozen=True)
+class GuEmersonEquation63PicardData:
+    """Coefficients held fixed during one segregated field solve.
+
+    Gu--Emerson solve equation (63) as a sequence of convection--diffusion
+    equations.  The source, viscosity and mass flux entering one field block
+    are therefore evaluated from the latest iterate and are not differentiated
+    with respect to that block's unknown.  Rebuilding this object before the
+    next field retains the printed sequential coupling.
+    """
+
+    explicit_source: np.ndarray
+    implicit_sink_by_slot: np.ndarray
+    mu: np.ndarray
+    gamma_by_slot: np.ndarray
+    mass_x: np.ndarray
+    mass_y: np.ndarray
+    provenance: str = (
+        "Gu--Emerson JFM 636 (2009), Sec. 5.2 segregated Picard stage: "
+        "central source and transport coefficients evaluated at stage entry"
+    )
+
+
 def equation63_gamma_by_slot(coefficient_mode: str) -> np.ndarray:
     """Return the printed ``Gamma_Phi`` in planar-17 storage order.
 
@@ -268,6 +291,88 @@ def gu_emerson_equation63_terms(
     )
 
 
+def gu_emerson_equation63_picard_data(
+    fields: GuEmersonFields,
+    *,
+    case: CavityCase,
+) -> GuEmersonEquation63PicardData:
+    """Freeze one stage's equation-(63) source and transport coefficients."""
+
+    terms = gu_emerson_equation63_terms(fields, case=case)
+    mu = np.asarray(case.mu(fields.theta), dtype=float)
+    physical = state_from_gu_emerson_fields(
+        fields,
+        x=case.x,
+        y=case.y,
+        mu=mu,
+    )
+    closures = gu_emerson_closures(
+        physical,
+        x=case.x,
+        y=case.y,
+        mu=mu,
+        edge_order=2,
+        coefficient_mode=case.r26_closure_mode,
+    )
+    faces = compatible_face_fields(physical, case.x, case.y, mu, closures)
+    packed = gu_emerson_fields_as_planar17(fields)
+    pressure = packed[..., 0] * packed[..., 3]
+    collision = pressure * packed[..., 0] / mu
+    sink = np.zeros_like(packed)
+    sink[..., 6:9] = collision[..., None]
+    sink[..., 4:6] = (2.0 / 3.0 * collision)[..., None]
+    sink[..., 12:16] = (3.0 / 2.0 * collision)[..., None]
+    sink[..., 9:12] = (7.0 / 6.0 * collision)[..., None]
+    sink[..., 16] = 2.0 / 3.0 * collision
+    # Equations (58)--(62) print ``-a*(p/mu)*rho*Phi`` on the
+    # right-hand side.  Move that dissipative linear term to the implicit
+    # diagonal; all remaining source terms stay at their stage-entry values.
+    explicit_source = np.asarray(terms.source, dtype=float) + sink * packed
+    return GuEmersonEquation63PicardData(
+        explicit_source=explicit_source.copy(),
+        implicit_sink_by_slot=sink,
+        mu=mu.copy(),
+        gamma_by_slot=np.asarray(terms.gamma_by_slot, dtype=float).copy(),
+        mass_x=np.asarray(faces.mass_x, dtype=float).copy(),
+        mass_y=np.asarray(faces.mass_y, dtype=float).copy(),
+    )
+
+
+def gu_emerson_equation63_picard_residual(
+    fields: GuEmersonFields,
+    *,
+    case: CavityCase,
+    frozen: GuEmersonEquation63PicardData,
+) -> np.ndarray:
+    """Evaluate one equation-(63) block with its right-hand side frozen."""
+
+    packed = gu_emerson_fields_as_planar17(fields)
+    expected = (case.nodes, case.nodes, 17)
+    if packed.shape != expected or frozen.explicit_source.shape != expected:
+        raise ValueError("Picard data and transformed fields must match the case grid")
+    if np.any(packed[..., 0] <= 0.0) or np.any(packed[..., 3] <= 0.0):
+        raise FloatingPointError("transformed FV requires positive rho and theta")
+    finite_volume_lhs = _finite_volume_lhs(
+        packed,
+        frozen.mu,
+        frozen.gamma_by_slot,
+        frozen.mass_x,
+        frozen.mass_y,
+        case.x,
+        case.y,
+    )
+    residual = (
+        finite_volume_lhs
+        + frozen.implicit_sink_by_slot * packed
+        - frozen.explicit_source
+    )
+    residual[[0, -1], :, :] = 0.0
+    residual[:, [0, -1], :] = 0.0
+    if not np.isfinite(residual).all():
+        raise FloatingPointError("equation-(63) Picard residual is non-finite")
+    return residual
+
+
 def gu_emerson_transformed_fv_residual(
     fields: GuEmersonFields,
     *,
@@ -280,8 +385,11 @@ def gu_emerson_transformed_fv_residual(
 
 __all__ = [
     "GU_EMERSON_TRANSFORMED_FV_PROVENANCE",
+    "GuEmersonEquation63PicardData",
     "GuEmersonEquation63Terms",
     "equation63_gamma_by_slot",
+    "gu_emerson_equation63_picard_data",
+    "gu_emerson_equation63_picard_residual",
     "gu_emerson_equation63_terms",
     "gu_emerson_transformed_fv_residual",
 ]
