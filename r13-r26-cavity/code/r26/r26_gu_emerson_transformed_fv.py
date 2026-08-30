@@ -104,6 +104,7 @@ class GuEmersonEquation63Consistency:
     transport_discretization_linf: float
     source_discretization_linf: float
     identity_roundoff: float
+    transformed_argmax_slot: int
     physical_point_argmax_slot: int
     transport_discretization_argmax_slot: int
     source_discretization_argmax_slot: int
@@ -737,6 +738,9 @@ def gu_emerson_equation63_consistency(
         np.abs(transport_discretization), axis=(0, 1)
     )
     source_by_slot = np.max(np.abs(source_discretization), axis=(0, 1))
+    transformed_by_slot = np.max(
+        np.abs(np.asarray(terms.residual)[interior]), axis=(0, 1)
+    )
     return GuEmersonEquation63Consistency(
         physical_point_linf=float(np.max(physical_by_slot, initial=0.0)),
         transport_discretization_linf=float(
@@ -746,6 +750,7 @@ def gu_emerson_equation63_consistency(
             np.max(source_by_slot, initial=0.0)
         ),
         identity_roundoff=float(np.max(np.abs(closure), initial=0.0)),
+        transformed_argmax_slot=int(np.argmax(transformed_by_slot)),
         physical_point_argmax_slot=int(np.argmax(physical_by_slot)),
         transport_discretization_argmax_slot=int(
             np.argmax(transport_by_slot)

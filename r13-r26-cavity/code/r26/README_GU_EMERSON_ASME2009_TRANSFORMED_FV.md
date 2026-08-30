@@ -129,5 +129,16 @@ roundoff once the interior bulk row dominates: at sweep 24 both are
 `6.349235e-3`, down from the initial physical gate `9.445238e-2`, and the best
 accepted state is the final sweep rather than an earlier cancellation point.
 The run remains fail-closed because `1e-8` has not been reached.  The next
-bounded step is therefore a longer N8 work budget/checkpoint run using these
-same equations; N16 remains unauthorized.
+bounded step was therefore a longer N8 work-budget run using these same
+equations.  At sweep 80 the three transformed, complete physical raw and
+scaled gates are all `3.748628e-3`; the best checkpoint is sweep 79 at
+`3.721863e-3`.  This is continued contraction, but far too slow to justify a
+blind increase toward the `1e-8` gate.
+
+Sweep records now name the physical gate region and the dominant transformed
+planar-17 slot and segregated block.  The N8 audit shows that the wall region
+controls through sweep 12, after which the bulk controls and slot 16 (`chi`)
+is dominant at sweeps 16, 20 and 24.  The next bounded development stage is
+therefore the equation-(62)/`chi` source-coupling linearisation on N8, not a
+larger grid or another undiagnosed work-budget increase.  N16 remains
+unauthorized.

@@ -505,6 +505,9 @@ class GuEmersonSweepRecord:
     transport_discretization_linf: float = float("nan")
     source_discretization_linf: float = float("nan")
     equation63_identity_roundoff: float = float("nan")
+    transformed_equation63_argmax_slot: int = -1
+    transformed_equation63_argmax_stage: str = ""
+    raw_gate_region: str = ""
     physical_point_argmax_slot: int = -1
     transport_discretization_argmax_slot: int = -1
     source_discretization_argmax_slot: int = -1
@@ -1172,6 +1175,31 @@ def _gate(problem: R26NodeBVP, state: np.ndarray) -> tuple[float, object, bool]:
     return raw, diagnostics, bool(diagnostics.min_density > 0.0 and diagnostics.min_temperature > 0.0)
 
 
+def _dominant_raw_gate_region(diagnostics: object) -> str:
+    """Name the physical residual region controlling the complete raw gate."""
+
+    candidates = (
+        ("bulk", diagnostics.raw_bulk_linf),
+        ("wall", diagnostics.raw_wall_linf),
+        ("extrapolation", diagnostics.raw_extrapolation_linf),
+        ("corner", diagnostics.raw_corner_linf),
+        ("held_continuity", abs(diagnostics.held_out_continuity)),
+        ("mass", abs(diagnostics.mass_error)),
+    )
+    return max(candidates, key=lambda item: item[1])[0]
+
+
+def _stage_for_planar_slot(slot: int) -> str:
+    """Map one planar-17 balance slot to its segregated solution block."""
+
+    if slot == 0:
+        return "simple_pressure_correction"
+    for stage, slots in FIELD_SLOTS.items():
+        if slot in slots:
+            return stage
+    raise ValueError(f"unknown planar-17 slot {slot}")
+
+
 def _sweep_metrics(
     problem: R26NodeBVP,
     fields: GuEmersonFields,
@@ -1201,6 +1229,7 @@ def _sweep_metrics(
             transport_discretization_linf=float("nan"),
             source_discretization_linf=float("nan"),
             identity_roundoff=float("nan"),
+            transformed_argmax_slot=-1,
             physical_point_argmax_slot=-1,
             transport_discretization_argmax_slot=-1,
             source_discretization_argmax_slot=-1,
@@ -1435,6 +1464,15 @@ def solve_gu_emerson_reconstruction(
                 consistency.source_discretization_linf
             ),
             equation63_identity_roundoff=consistency.identity_roundoff,
+            transformed_equation63_argmax_slot=(
+                consistency.transformed_argmax_slot
+            ),
+            transformed_equation63_argmax_stage=(
+                _stage_for_planar_slot(consistency.transformed_argmax_slot)
+                if consistency.transformed_argmax_slot >= 0
+                else ""
+            ),
+            raw_gate_region=_dominant_raw_gate_region(diagnostics),
             physical_point_argmax_slot=consistency.physical_point_argmax_slot,
             transport_discretization_argmax_slot=(
                 consistency.transport_discretization_argmax_slot

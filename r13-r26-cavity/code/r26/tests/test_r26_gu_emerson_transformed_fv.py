@@ -124,6 +124,7 @@ def test_equation63_source_is_fv_compatible_for_all_transformed_rows() -> None:
     assert consistency.physical_point_linf > 0.0
     assert consistency.transport_discretization_linf > 0.0
     assert consistency.source_discretization_linf > 0.0
+    assert 0 <= consistency.transformed_argmax_slot < 17
     assert 0 <= consistency.physical_point_argmax_slot < 17
     assert 0 <= consistency.transport_discretization_argmax_slot < 17
     assert 0 <= consistency.source_discretization_argmax_slot < 17
@@ -234,6 +235,16 @@ def test_direct_equation63_executes_the_complete_published_order() -> None:
     assert result.records[0].transport_discretization_linf < 5.0e-14
     assert result.records[0].source_discretization_linf < 5.0e-14
     assert result.records[0].equation63_identity_roundoff < 5.0e-14
+    assert 0 <= result.records[0].transformed_equation63_argmax_slot < 17
+    assert result.records[0].transformed_equation63_argmax_stage
+    assert result.records[0].raw_gate_region in {
+        "bulk",
+        "wall",
+        "extrapolation",
+        "corner",
+        "held_continuity",
+        "mass",
+    }
     assert result.records[0].stage_order == (
         "velocity",
         "simple_pressure_correction",
