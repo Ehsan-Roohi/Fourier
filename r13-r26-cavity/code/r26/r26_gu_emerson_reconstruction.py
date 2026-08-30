@@ -506,12 +506,22 @@ class GuEmersonSweepRecord:
     transport_discretization_linf: float = float("nan")
     source_discretization_linf: float = float("nan")
     equation63_identity_roundoff: float = float("nan")
+    compatible_physical_fv_linf: float = float("nan")
+    source_scheme_mismatch_linf: float = float("nan")
+    compatibility_identity_roundoff: float = float("nan")
     transformed_equation63_argmax_slot: int = -1
     transformed_equation63_argmax_stage: str = ""
     raw_gate_region: str = ""
     physical_point_argmax_slot: int = -1
     transport_discretization_argmax_slot: int = -1
     source_discretization_argmax_slot: int = -1
+    compatible_physical_fv_argmax_slot: int = -1
+    source_scheme_mismatch_argmax_slot: int = -1
+    source_scheme_mismatch_argmax_y: int = -1
+    source_scheme_mismatch_argmax_x: int = -1
+    transformed_at_source_mismatch: float = float("nan")
+    compatible_physical_at_source_mismatch: float = float("nan")
+    source_scheme_mismatch_at_argmax: float = float("nan")
 
 
 @dataclass(frozen=True)
@@ -1230,10 +1240,20 @@ def _sweep_metrics(
             transport_discretization_linf=float("nan"),
             source_discretization_linf=float("nan"),
             identity_roundoff=float("nan"),
+            compatible_physical_fv_linf=float("nan"),
+            source_scheme_mismatch_linf=float("nan"),
+            compatibility_identity_roundoff=float("nan"),
             transformed_argmax_slot=-1,
             physical_point_argmax_slot=-1,
             transport_discretization_argmax_slot=-1,
             source_discretization_argmax_slot=-1,
+            compatible_physical_fv_argmax_slot=-1,
+            source_scheme_mismatch_argmax_slot=-1,
+            source_scheme_mismatch_argmax_y=-1,
+            source_scheme_mismatch_argmax_x=-1,
+            transformed_at_source_mismatch=float("nan"),
+            compatible_physical_at_source_mismatch=float("nan"),
+            source_scheme_mismatch_at_argmax=float("nan"),
         )
     normalized = [
         raw / options.raw_tolerance,
@@ -1465,6 +1485,15 @@ def solve_gu_emerson_reconstruction(
                 consistency.source_discretization_linf
             ),
             equation63_identity_roundoff=consistency.identity_roundoff,
+            compatible_physical_fv_linf=(
+                consistency.compatible_physical_fv_linf
+            ),
+            source_scheme_mismatch_linf=(
+                consistency.source_scheme_mismatch_linf
+            ),
+            compatibility_identity_roundoff=(
+                consistency.compatibility_identity_roundoff
+            ),
             transformed_equation63_argmax_slot=(
                 consistency.transformed_argmax_slot
             ),
@@ -1480,6 +1509,27 @@ def solve_gu_emerson_reconstruction(
             ),
             source_discretization_argmax_slot=(
                 consistency.source_discretization_argmax_slot
+            ),
+            compatible_physical_fv_argmax_slot=(
+                consistency.compatible_physical_fv_argmax_slot
+            ),
+            source_scheme_mismatch_argmax_slot=(
+                consistency.source_scheme_mismatch_argmax_slot
+            ),
+            source_scheme_mismatch_argmax_y=(
+                consistency.source_scheme_mismatch_argmax_y
+            ),
+            source_scheme_mismatch_argmax_x=(
+                consistency.source_scheme_mismatch_argmax_x
+            ),
+            transformed_at_source_mismatch=(
+                consistency.transformed_at_source_mismatch
+            ),
+            compatible_physical_at_source_mismatch=(
+                consistency.compatible_physical_at_source_mismatch
+            ),
+            source_scheme_mismatch_at_argmax=(
+                consistency.source_scheme_mismatch_at_argmax
             ),
         )
         records.append(record)

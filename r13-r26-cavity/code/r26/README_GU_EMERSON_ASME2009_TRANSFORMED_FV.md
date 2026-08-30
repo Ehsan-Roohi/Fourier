@@ -16,9 +16,9 @@ The direct backend uses the structure printed in section 5.2:
 - collocated finite volumes;
 - CUBISTA convection of each transformed field;
 - central face diffusion with the printed `mu/Gamma_Phi` coefficients;
-- direct conservative RHS fluxes for equations (56)--(62), formed at cell
-  centres and centrally interpolated to faces, with collision/nonlinear local
-  terms evaluated at cell centres;
+- direct conservative RHS fluxes for equations (56)--(62), formed on faces
+  with central transported values and two-point normal gradients, with
+  collision/nonlinear local terms evaluated at cell centres;
 - segregated Picard linearisation: source, viscosity and mass flux are frozen
   at the entry to each field block and rebuilt before the next printed field;
 - the dissipative linear collision sinks printed in equations (58)--(62) are
@@ -28,16 +28,16 @@ The direct backend uses the structure printed in section 5.2:
   -> chi -> physical moments -> wall conditions`.
 
 The long right-hand sides of equations (56)--(62) are represented in their
-printed conservative flux form.  At each cell centre the reconstructed
-physical-moment flux is subtracted from the transformed equation-(63) flux;
-that difference is then centrally interpolated to the control-volume faces.
+printed conservative flux form.  The transformed and reconstructed physical
+fluxes are each built directly on a control-volume face and then subtracted.
 CUBISTA is therefore confined to the transported field on the left-hand side
 and cannot leak into a source term.  The former compatible CUBISTA-difference
 source is retained in the term record only as an audit baseline.  The backend
 never calls the physical BVP residual from a transformed field block.  A
-manufactured non-equilibrium test confirms that the central source is distinct
-from that baseline in the momentum and high-moment rows and keeps equilibrium
-as an exact conservative fixed point.
+manufactured non-equilibrium test confirms the expected algebraic cancellation
+in momentum/temperature source transport, a genuine central-versus-CUBISTA
+difference in the higher-moment rows, and equilibrium as an exact conservative
+fixed point.
 
 ## Literal ASME cavity contract
 
@@ -168,3 +168,17 @@ promoting them.  This is a complete central-source fidelity correction, not a
 convergence claim: N8 still fails closed and N16 remains blocked.  The next
 bounded work is the measured transformed/physical discretization mismatch at
 that N8 checkpoint, not relaxation tuning or grid refinement.
+
+That mismatch is now recorded directly in every sweep.  The discrete identity
+`R63 - Rphysical,FV + (Scentral - Scompatible) = 0` closes to roundoff; at the
+former best sweep 17 it exposed a `1.031240e-2` source-scheme mismatch caused
+by forming the central source from cell-centred gradients and only then
+interpolating it.  The corrected stencil constructs both sides of each source
+flux directly at the face.  On the same N8 run the raw gate is
+`3.028981e-2` at sweep 8 and `5.013962e-3` at sweep 24, where the transformed
+and independent compatible physical FV maxima agree.  The 24-sweep value is
+below both the compatible baseline (`6.349235e-3`) and the former
+cell-centred-source result (`1.395834e-2`); the source-scheme mismatch has
+fallen to `7.900630e-5`.  Sweep 24 is the best simultaneous checkpoint.  N8
+still fails the `1e-8` gate, so N16 remains blocked; the next bounded stage
+must continue on this N8 face-consistent system.

@@ -15,12 +15,13 @@ convected transformed field, central face differences for diffusion, the
 existing Rhie--Chow mass flux for pressure--velocity coupling, and the same
 wall-bounded conservative control volumes as the independent physical R26
 gate.  The source is evaluated without transcribing every expanded tensor
-component: cell-centred transformed and physical fluxes are subtracted before
-central face interpolation.  This is algebraically the printed right-hand
-side of equations (56)--(62), while avoiding the difference of two nonlinear
-CUBISTA reconstructions.  The remaining collision and nonlinear terms are
-evaluated directly from ``Sigma,Q,M,S,N``.  This path does not call the
-physical BVP residual.
+component: transformed and physical fluxes are constructed directly at faces
+with central transported values and two-point normal gradients, then
+subtracted.  This is algebraically the printed right-hand side of equations
+(56)--(62), while avoiding the difference of two nonlinear CUBISTA
+reconstructions.  The remaining collision and nonlinear terms are evaluated
+directly from ``Sigma,Q,M,S,N``.  This path does not call the physical BVP
+residual.
 
 Only interior entries are balance rows.  Smooth-wall and corner rows remain
 owned by ``r26_discretization`` and are independently checked in physical
@@ -105,10 +106,20 @@ class GuEmersonEquation63Consistency:
     transport_discretization_linf: float
     source_discretization_linf: float
     identity_roundoff: float
+    compatible_physical_fv_linf: float
+    source_scheme_mismatch_linf: float
+    compatibility_identity_roundoff: float
     transformed_argmax_slot: int
     physical_point_argmax_slot: int
     transport_discretization_argmax_slot: int
     source_discretization_argmax_slot: int
+    compatible_physical_fv_argmax_slot: int
+    source_scheme_mismatch_argmax_slot: int
+    source_scheme_mismatch_argmax_y: int
+    source_scheme_mismatch_argmax_x: int
+    transformed_at_source_mismatch: float
+    compatible_physical_at_source_mismatch: float
+    source_scheme_mismatch_at_argmax: float
 
 
 @dataclass(frozen=True)
@@ -225,8 +236,13 @@ def _finite_volume_fluxes(
     mass_y: np.ndarray,
     x: np.ndarray,
     y: np.ndarray,
+    *,
+    convection_scheme: str = "cubista",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return internal and physical-wall fluxes on equation-(63)'s left side."""
+
+    if convection_scheme not in {"central", "cubista"}:
+        raise ValueError("convection_scheme must be central or cubista")
 
     flux_x = np.zeros((packed.shape[0], packed.shape[1] - 1, 17), dtype=float)
     flux_y = np.zeros((packed.shape[0] - 1, packed.shape[1], 17), dtype=float)
@@ -236,8 +252,12 @@ def _finite_volume_fluxes(
     flux_y[..., 0] = mass_y
     for slot in range(1, packed.shape[-1]):
         field = packed[..., slot]
-        face_x = cubista_face_value(field, mass_x, axis=1)
-        face_y = cubista_face_value(field, mass_y, axis=0)
+        if convection_scheme == "cubista":
+            face_x = cubista_face_value(field, mass_x, axis=1)
+            face_y = cubista_face_value(field, mass_y, axis=0)
+        else:
+            face_x = _face_average(field, 1)
+            face_y = _face_average(field, 0)
         coefficient_x = _face_average(mu / gamma[slot], 1)
         coefficient_y = _face_average(mu / gamma[slot], 0)
         flux_x[..., slot] = mass_x * face_x - coefficient_x * _normal_face_gradient(
@@ -307,8 +327,13 @@ def _physical_fv_fluxes(
     physical: np.ndarray,
     closures: R26Closures,
     faces: CompatibleFaceFields,
+    *,
+    convection_scheme: str = "cubista",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return the conservative physical transport fluxes in planar-17 order."""
+
+    if convection_scheme not in {"central", "cubista"}:
+        raise ValueError("convection_scheme must be central or cubista")
 
     tensors = planar_state_to_tensors(physical)
     rho = np.asarray(tensors.rho)
@@ -321,6 +346,8 @@ def _physical_fv_fluxes(
     delta = np.asarray(tensors.Delta)
 
     def transported(field: np.ndarray, axis: int) -> np.ndarray:
+        if convection_scheme == "central":
+            return _face_average(field, axis)
         mass = faces.mass_x if axis == 1 else faces.mass_y
         return cubista_face_value(field, mass, axis=axis)
 
@@ -512,93 +539,6 @@ def _physical_local_terms(
     )
 
 
-def _central_equation63_source_fluxes(
-    physical: np.ndarray,
-    packed: np.ndarray,
-    mu: np.ndarray,
-    gamma: np.ndarray,
-    closures: R26Closures,
-    x: np.ndarray,
-    y: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Return centrally interpolated source fluxes for equations (56)--(62).
-
-    At a cell centre, transformed flux minus physical-moment flux is exactly
-    the conservative part of the printed right-hand side.  Interpolating that
-    difference centrally implements section 5.2 without introducing CUBISTA
-    into a source term.
-    """
-
-    tensors = planar_state_to_tensors(physical)
-    rho = np.asarray(tensors.rho)
-    velocity = np.asarray(tensors.velocity)
-    theta = np.asarray(tensors.theta)
-    sigma = np.asarray(tensors.sigma)
-    q = np.asarray(tensors.heat_flux)
-    mm = np.asarray(tensors.m)
-    rr = np.asarray(tensors.R)
-    delta = np.asarray(tensors.Delta)
-    pressure = rho * theta
-    d_dx = np.gradient(packed, x, axis=1, edge_order=2)
-    d_dy = np.gradient(packed, y, axis=0, edge_order=2)
-    diffusion = mu[..., None] / gamma
-    transformed_x = (
-        rho[..., None] * velocity[..., 0, None] * packed - diffusion * d_dx
-    )
-    transformed_y = (
-        rho[..., None] * velocity[..., 1, None] * packed - diffusion * d_dy
-    )
-    transformed_x[..., 0] = rho * velocity[..., 0]
-    transformed_y[..., 0] = rho * velocity[..., 1]
-
-    momentum_x = rho[..., None] * velocity[..., 0, None] * velocity
-    momentum_y = rho[..., None] * velocity[..., 1, None] * velocity
-    momentum_x += sigma[..., :, 0]
-    momentum_y += sigma[..., :, 1]
-    momentum_x[..., 0] += pressure
-    momentum_y[..., 1] += pressure
-    physical_x = _pack_balance_families(
-        mass=rho * velocity[..., 0],
-        momentum=momentum_x,
-        theta=rho * velocity[..., 0] * theta + 2.0 / 3.0 * q[..., 0],
-        stress=velocity[..., 0, None, None] * sigma + mm[..., :, :, 0],
-        heat=velocity[..., 0, None] * q + 0.5 * rr[..., :, 0],
-        m=(
-            velocity[..., 0, None, None, None] * mm
-            + np.asarray(closures.phi)[..., :, :, :, 0]
-        ),
-        R=(
-            velocity[..., 0, None, None] * rr
-            + np.asarray(closures.psi)[..., :, :, 0]
-        ),
-        Delta=velocity[..., 0] * delta + np.asarray(closures.Omega)[..., 0],
-    )
-    physical_y = _pack_balance_families(
-        mass=rho * velocity[..., 1],
-        momentum=momentum_y,
-        theta=rho * velocity[..., 1] * theta + 2.0 / 3.0 * q[..., 1],
-        stress=velocity[..., 1, None, None] * sigma + mm[..., :, :, 1],
-        heat=velocity[..., 1, None] * q + 0.5 * rr[..., :, 1],
-        m=(
-            velocity[..., 1, None, None, None] * mm
-            + np.asarray(closures.phi)[..., :, :, :, 1]
-        ),
-        R=(
-            velocity[..., 1, None, None] * rr
-            + np.asarray(closures.psi)[..., :, :, 1]
-        ),
-        Delta=velocity[..., 1] * delta + np.asarray(closures.Omega)[..., 1],
-    )
-    source_x = transformed_x - physical_x
-    source_y = transformed_y - physical_y
-    return (
-        _face_average(source_x, 1),
-        _face_average(source_y, 0),
-        source_x,
-        source_y,
-    )
-
-
 def _equation63_source(
     physical: np.ndarray,
     packed: np.ndarray,
@@ -612,7 +552,9 @@ def _equation63_source(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return the central source and its compatible-flux audit baseline."""
 
-    physical_fluxes = _physical_fv_fluxes(physical, closures, faces)
+    physical_fluxes = _physical_fv_fluxes(
+        physical, closures, faces, convection_scheme="cubista"
+    )
     compatible_fluxes = tuple(
         transformed - physical_flux
         for transformed, physical_flux in zip(
@@ -622,8 +564,26 @@ def _equation63_source(
     compatible_transport = wall_bounded_face_divergence(
         *compatible_fluxes, x, y
     )
-    central_fluxes = _central_equation63_source_fluxes(
-        physical, packed, mu, gamma, closures, x, y
+    central_transformed_fluxes = _finite_volume_fluxes(
+        packed,
+        mu,
+        gamma,
+        faces.mass_x,
+        faces.mass_y,
+        x,
+        y,
+        convection_scheme="central",
+    )
+    central_physical_fluxes = _physical_fv_fluxes(
+        physical, closures, faces, convection_scheme="central"
+    )
+    central_fluxes = tuple(
+        transformed - physical_flux
+        for transformed, physical_flux in zip(
+            central_transformed_fluxes,
+            central_physical_fluxes,
+            strict=True,
+        )
     )
     source_transport = wall_bounded_face_divergence(
         *central_fluxes, x, y
@@ -863,6 +823,31 @@ def gu_emerson_equation63_consistency(
     transformed_by_slot = np.max(
         np.abs(np.asarray(terms.residual)[interior]), axis=(0, 1)
     )
+    compatible_physical = (
+        np.asarray(terms.finite_volume_lhs)
+        - np.asarray(terms.compatible_source)
+    )[interior]
+    source_scheme_mismatch = (
+        np.asarray(terms.source) - np.asarray(terms.compatible_source)
+    )[interior]
+    compatibility_closure = (
+        np.asarray(terms.residual)[interior]
+        - compatible_physical
+        + source_scheme_mismatch
+    )
+    compatible_physical_by_slot = np.max(
+        np.abs(compatible_physical), axis=(0, 1)
+    )
+    mismatch_by_slot = np.max(
+        np.abs(source_scheme_mismatch), axis=(0, 1)
+    )
+    mismatch_local = np.unravel_index(
+        int(np.argmax(np.abs(source_scheme_mismatch))),
+        source_scheme_mismatch.shape,
+    )
+    mismatch_y = int(mismatch_local[0])
+    mismatch_x = int(mismatch_local[1])
+    mismatch_slot = int(mismatch_local[2])
     return GuEmersonEquation63Consistency(
         physical_point_linf=float(np.max(physical_by_slot, initial=0.0)),
         transport_discretization_linf=float(
@@ -872,12 +857,38 @@ def gu_emerson_equation63_consistency(
             np.max(source_by_slot, initial=0.0)
         ),
         identity_roundoff=float(np.max(np.abs(closure), initial=0.0)),
+        compatible_physical_fv_linf=float(
+            np.max(compatible_physical_by_slot, initial=0.0)
+        ),
+        source_scheme_mismatch_linf=float(
+            np.max(mismatch_by_slot, initial=0.0)
+        ),
+        compatibility_identity_roundoff=float(
+            np.max(np.abs(compatibility_closure), initial=0.0)
+        ),
         transformed_argmax_slot=int(np.argmax(transformed_by_slot)),
         physical_point_argmax_slot=int(np.argmax(physical_by_slot)),
         transport_discretization_argmax_slot=int(
             np.argmax(transport_by_slot)
         ),
         source_discretization_argmax_slot=int(np.argmax(source_by_slot)),
+        compatible_physical_fv_argmax_slot=int(
+            np.argmax(compatible_physical_by_slot)
+        ),
+        source_scheme_mismatch_argmax_slot=mismatch_slot,
+        source_scheme_mismatch_argmax_y=mismatch_y + 1,
+        source_scheme_mismatch_argmax_x=mismatch_x + 1,
+        transformed_at_source_mismatch=float(
+            np.asarray(terms.residual)[
+                mismatch_y + 1, mismatch_x + 1, mismatch_slot
+            ]
+        ),
+        compatible_physical_at_source_mismatch=float(
+            compatible_physical[mismatch_local]
+        ),
+        source_scheme_mismatch_at_argmax=float(
+            source_scheme_mismatch[mismatch_local]
+        ),
     )
 
 

@@ -117,18 +117,42 @@ def test_equation63_sources_are_central_not_cubista_flux_differences() -> None:
         axis=(0, 1),
     )
     assert source_difference[0] == 0.0
-    assert source_difference[1] > 1.0e-6
-    assert source_difference[4] > 1.0e-5
-    assert source_difference[16] > 1.0e-7
+    # Momentum and temperature transport cancel algebraically between the
+    # transformed and physical face fluxes.  Higher moments retain a genuine
+    # central-versus-CUBISTA source-scheme difference.
+    assert np.max(source_difference[1:4]) < 5.0e-14
+    assert source_difference[4] > 1.0e-6
+    assert source_difference[16] > 1.0e-9
     assert np.max(
         np.abs(terms.residual[1:-1, 1:-1] - physical_fv[1:-1, 1:-1])
-    ) > 1.0e-5
+    ) > 1.0e-6
     assert np.max(np.abs(terms.source[..., 1:])) > 0.0
     assert np.max(np.abs(terms.finite_volume_lhs[1:-1, 1:-1, 1:])) > 0.0
     assert np.array_equal(terms.residual[0], np.zeros_like(terms.residual[0]))
     assert np.array_equal(terms.residual[-1], np.zeros_like(terms.residual[-1]))
     consistency = gu_emerson_equation63_consistency(terms)
     assert consistency.identity_roundoff < 2.0e-15
+    assert consistency.compatibility_identity_roundoff < 2.0e-15
+    assert np.isclose(
+        consistency.compatible_physical_fv_linf,
+        np.max(np.abs(physical_fv[1:-1, 1:-1])),
+        rtol=0.0,
+        atol=3.0e-13,
+    )
+    assert np.isclose(
+        consistency.source_scheme_mismatch_linf,
+        np.max(source_difference),
+        rtol=0.0,
+        atol=2.0e-15,
+    )
+    assert abs(
+        consistency.transformed_at_source_mismatch
+        - consistency.compatible_physical_at_source_mismatch
+        + consistency.source_scheme_mismatch_at_argmax
+    ) < 2.0e-15
+    assert 1 <= consistency.source_scheme_mismatch_argmax_y < case.nodes - 1
+    assert 1 <= consistency.source_scheme_mismatch_argmax_x < case.nodes - 1
+    assert 0 <= consistency.source_scheme_mismatch_argmax_slot < 17
     assert consistency.physical_point_linf > 0.0
     assert consistency.transport_discretization_linf > 0.0
     assert consistency.source_discretization_linf > 0.0
