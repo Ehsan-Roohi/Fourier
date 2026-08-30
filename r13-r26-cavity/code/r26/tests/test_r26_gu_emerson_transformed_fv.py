@@ -66,6 +66,9 @@ def test_asme2009_published_case_is_literal_and_off_paper_values_fail() -> None:
     case = gu_asme2009_published_cavity_case(kn=0.2, lid_speed_m_per_s=100.0)
     assert case.nodes == 100
     assert case.r26_closure_mode == "asme2009-cavity"
+    assert "MNHMT2009-18236" in contract.paper
+    assert "MNHMT2009-18236" in case.provenance
+    assert "HT2009-88293" not in case.provenance
     assert case.wall_temperature == 1.0
     assert case.grid_stretch_beta == 0.0
     assert np.isclose(case.lid_velocity, 100.0 / np.sqrt(208.0 * 273.0))

@@ -351,7 +351,7 @@ def gu_asme2009_cavity_case(
     wall_temperature_K: float = 273.0,
     grid_stretch_beta: float = 0.0,
 ) -> CavityCase:
-    """Direct Gu--John--Tang--Emerson ASME HT2009-88293 cavity case.
+    """Direct Gu--John--Tang--Emerson ASME MNHMT2009-18236 cavity case.
 
     The paper uses ``Kn=lambda/L`` with ``lambda=(mu/p)*sqrt(pi*R*T/2)``,
     argon ``R=208``, ``T0=273 K``, ``S=144 K``, diffuse walls, and reports
@@ -377,7 +377,7 @@ def gu_asme2009_cavity_case(
         grid_stretch_beta=float(grid_stretch_beta),
         r26_closure_mode="asme2009-cavity",
         provenance=(
-            "Gu--John--Tang--Emerson ASME HT2009-88293 driven cavity; "
+            "Gu--John--Tang--Emerson ASME MNHMT2009-18236 driven cavity; "
             "Gu lambda/L Kn, source-locked ASME closure constants, "
             "Sutherland mu0=21.25e-6 Pa s at 273 K, S=144 K; "
             f"requested grid={nodes} points (paper grid={contract.published_grid_points})"

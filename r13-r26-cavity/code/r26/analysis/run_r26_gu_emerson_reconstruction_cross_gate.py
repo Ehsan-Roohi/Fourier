@@ -177,7 +177,7 @@ def main() -> None:
         ),
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "source_commit": args.source_commit,
-        "case_reference": "Gu--John--Tang--Emerson ASME HT2009-88293",
+        "case_reference": "Gu--John--Tang--Emerson ASME MNHMT2009-18236",
         "case_fixed": {
             "kn_gu": 0.1,
             "lid_speed_m_s": 10.0,
