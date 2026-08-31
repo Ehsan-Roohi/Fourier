@@ -329,6 +329,7 @@ def _physical_fv_fluxes(
     faces: CompatibleFaceFields,
     *,
     convection_scheme: str = "cubista",
+    historical_central_momentum: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Return the conservative physical transport fluxes in planar-17 order."""
 
@@ -354,8 +355,23 @@ def _physical_fv_fluxes(
     pressure = rho * theta
     pressure_x = _face_average(pressure, 1)
     pressure_y = _face_average(pressure, 0)
-    momentum_x = faces.mass_x[..., None] * transported(velocity, 1)
-    momentum_y = faces.mass_y[..., None] * transported(velocity, 0)
+    # The accepted JFM compatible-FV roots predate the direct equation-(63)
+    # path.  Their central momentum flux transports the Rhie--Chow face
+    # velocity itself, rather than a second arithmetic interpolation of the
+    # cell velocity.  Keep that historical choice opt-in: the published ASME
+    # reconstruction continues to use its existing source discretization.
+    momentum_velocity_x = (
+        faces.velocity_x
+        if convection_scheme == "central" and historical_central_momentum
+        else transported(velocity, 1)
+    )
+    momentum_velocity_y = (
+        faces.velocity_y
+        if convection_scheme == "central" and historical_central_momentum
+        else transported(velocity, 0)
+    )
+    momentum_x = faces.mass_x[..., None] * momentum_velocity_x
+    momentum_y = faces.mass_y[..., None] * momentum_velocity_y
     momentum_x += faces.sigma_x[..., :, 0]
     momentum_y += faces.sigma_y[..., :, 1]
     momentum_x[..., 0] += pressure_x
@@ -791,6 +807,92 @@ def gu_emerson_transformed_fv_residual(
     return gu_emerson_equation63_terms(fields, case=case).residual
 
 
+def gu_emerson_compatible_transformed_fv_residual(
+    fields: GuEmersonFields,
+    *,
+    case: CavityCase,
+    convection_scheme: str = "central",
+) -> np.ndarray:
+    """Reconcile equation (63) with one compatible physical FV operator.
+
+    This is the same-grid JFM acceptance backend.  The transformed left-hand
+    flux and the transformed-minus-physical source flux use the *same*
+    interpolation.  Their transformed contributions therefore cancel
+    algebraically, leaving the compatible physical finite-volume residual.
+    It does not alter :func:`gu_emerson_transformed_fv_residual`, whose mixed
+    CUBISTA/central source construction remains the direct ASME development
+    path.
+
+    Only interior entries are returned as equation-(63) balance rows.  Wall,
+    corner, held-continuity and mass-border rows remain owned by the physical
+    :class:`R26NodeBVP` gate.
+    """
+
+    scheme = str(convection_scheme).lower()
+    if scheme not in {"central", "cubista"}:
+        raise ValueError("convection_scheme must be central or cubista")
+    x = _coordinates(case.x, case.nodes, "x")
+    y = _coordinates(case.y, case.nodes, "y")
+    packed = gu_emerson_fields_as_planar17(fields)
+    if packed.shape != (case.nodes, case.nodes, 17):
+        raise ValueError(
+            "transformed fields must match the square case grid and planar-17 layout"
+        )
+    if np.any(packed[..., 0] <= 0.0) or np.any(packed[..., 3] <= 0.0):
+        raise FloatingPointError("transformed FV requires positive rho and theta")
+
+    mu = np.asarray(case.mu(packed[..., 3]), dtype=float)
+    physical = state_from_gu_emerson_fields(fields, x=x, y=y, mu=mu)
+    closures = gu_emerson_closures(
+        physical,
+        x=x,
+        y=y,
+        mu=mu,
+        edge_order=2,
+        coefficient_mode=case.r26_closure_mode,
+    )
+    faces = compatible_face_fields(physical, x, y, mu, closures)
+    gamma = equation63_gamma_by_slot(case.r26_closure_mode)
+    transformed_fluxes = _finite_volume_fluxes(
+        packed,
+        mu,
+        gamma,
+        faces.mass_x,
+        faces.mass_y,
+        x,
+        y,
+        convection_scheme=scheme,
+    )
+    physical_fluxes = _physical_fv_fluxes(
+        physical,
+        closures,
+        faces,
+        convection_scheme=scheme,
+        historical_central_momentum=True,
+    )
+    source_fluxes = tuple(
+        transformed - physical_flux
+        for transformed, physical_flux in zip(
+            transformed_fluxes, physical_fluxes, strict=True
+        )
+    )
+    transformed_lhs = wall_bounded_face_divergence(
+        *transformed_fluxes, x, y
+    )
+    source_transport = wall_bounded_face_divergence(*source_fluxes, x, y)
+    source = source_transport - _physical_local_terms(
+        physical, mu, closures, x, y
+    )
+    residual = transformed_lhs - source
+    residual[[0, -1], :, :] = 0.0
+    residual[:, [0, -1], :] = 0.0
+    if not np.isfinite(residual).all():
+        raise FloatingPointError(
+            "compatible transformed FV residual contains NaN or infinity"
+        )
+    return residual
+
+
 def gu_emerson_equation63_consistency(
     terms: GuEmersonEquation63Terms,
 ) -> GuEmersonEquation63Consistency:
@@ -902,5 +1004,6 @@ __all__ = [
     "gu_emerson_equation63_picard_data",
     "gu_emerson_equation63_picard_residual",
     "gu_emerson_equation63_terms",
+    "gu_emerson_compatible_transformed_fv_residual",
     "gu_emerson_transformed_fv_residual",
 ]

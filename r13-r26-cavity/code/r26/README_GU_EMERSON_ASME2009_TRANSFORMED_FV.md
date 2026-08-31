@@ -318,3 +318,28 @@ rule.  The new operator therefore remains diagnostic-only, and N16 remains
 blocked.  The next useful N8 target is the first complete Newton direction:
 identify the unknown correction and residual row that reject steps above
 `1/64`, rather than adding relaxation or another corner model.
+
+## Separate JFM Maxwell N28 same-grid reconciliation
+
+The ASME development above is not a validation of the accepted JFM Maxwell
+state: its coefficient set, dimensional wall temperature and development
+grids are different.  The fail-closed JFM path is therefore isolated in
+`r26_gu_emerson_jfm_same_grid_gate.py`.  It locks the exact `N=28`,
+`Kn_Gu=0.20`, `U_lid=100 m/s`, `Tw=300 K`, uniform-grid, fully diffuse,
+Maxwell-molecule case with final `jfm2009` coefficients and the decoded frozen
+state hash
+`e1fb8c5696351f0409c3a7cf984bfd4c99a25dbc79f82bd944655cfa21467ff4`.
+
+For this reconciliation only, both sides of equation (63) use the same
+historical compatible central face interpolation.  The transformed flux then
+cancels algebraically from the transformed-minus-physical source flux, and
+the interior residual must equal `compatible_fv_bulk_residual` to roundoff.
+The direct ASME CUBISTA/central-source backend is unchanged.
+
+The Unity job
+`hpc/r26_gu_emerson_jfm_n28_same_grid_gate.slurm` reads the accepted N28
+archive without modifying it, re-runs the full unit suite and independent
+Maxwell validator, checks all 17 fields and centreline/global `D/G` metrics,
+replays the candidate independently, and packages every record.  It runs no
+higher grid.  Only a boolean passed record may authorize one bounded N32
+candidate; N40, N44 and production acceptance remain false.

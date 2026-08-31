@@ -8,9 +8,10 @@ from r26_cases import (
     GU_ASME2009_CAVITY_CONTRACT,
     gu_asme2009_cavity_case,
     gu_asme2009_published_cavity_case,
+    jfm_maxwell_cavity_case,
 )
 from r26_discretization import R26NodeBVP
-from r26_fv_backend import thor_fv_bulk_residual
+from r26_fv_backend import compatible_fv_bulk_residual, thor_fv_bulk_residual
 from r26_gu_emerson_reconstruction import (
     GuEmersonReconstructionOptions,
     _SegregatedReconstructionOperators,
@@ -19,6 +20,7 @@ from r26_gu_emerson_reconstruction import (
 )
 from r26_gu_emerson_transformed_fv import (
     equation63_gamma_by_slot,
+    gu_emerson_compatible_transformed_fv_residual,
     gu_emerson_equation63_consistency,
     gu_emerson_equation63_picard_data,
     gu_emerson_equation63_picard_residual,
@@ -163,6 +165,51 @@ def test_equation63_sources_are_central_not_cubista_flux_differences() -> None:
     assert 0 <= consistency.physical_point_argmax_slot < 17
     assert 0 <= consistency.transport_discretization_argmax_slot < 17
     assert 0 <= consistency.source_discretization_argmax_slot < 17
+
+
+def test_jfm_same_grid_backend_equals_historical_compatible_fv_operator() -> None:
+    case = jfm_maxwell_cavity_case(
+        8,
+        kn=0.2,
+        lid_speed_m_per_s=100.0,
+        wall_temperature_K=300.0,
+        grid_stretch_beta=0.0,
+    )
+    y, x = np.meshgrid(case.y, case.x, indexing="ij")
+    state = case.equilibrium_state()
+    envelope = np.sin(np.pi * x) * np.sin(np.pi * y)
+    state[..., 0] += 3.0e-3 * envelope
+    state[..., 1] = 2.0e-3 * envelope
+    state[..., 2] = -1.0e-3 * np.sin(2.0 * np.pi * x) * np.sin(np.pi * y)
+    state[..., 3] += 2.0e-3 * np.sin(np.pi * x) * np.sin(2.0 * np.pi * y)
+    for slot in range(4, 17):
+        state[..., slot] = 2.0e-5 / (slot + 1.0) * envelope
+    mu = case.mu(state[..., 3])
+    fields = gu_emerson_fields_from_state(
+        state, x=case.x, y=case.y, mu=mu
+    )
+    rebuilt = state_from_gu_emerson_fields(
+        fields, x=case.x, y=case.y, mu=case.mu(fields.theta)
+    )
+    transformed = gu_emerson_compatible_transformed_fv_residual(
+        fields, case=case, convection_scheme="central"
+    )
+    physical = compatible_fv_bulk_residual(
+        rebuilt,
+        case.x,
+        case.y,
+        case.mu(rebuilt[..., 3]),
+        case=case,
+        convection_scheme="central",
+    )
+    np.testing.assert_allclose(
+        transformed[1:-1, 1:-1],
+        physical[1:-1, 1:-1],
+        rtol=0.0,
+        atol=3.0e-13,
+    )
+    assert np.array_equal(transformed[0], np.zeros_like(transformed[0]))
+    assert np.array_equal(transformed[-1], np.zeros_like(transformed[-1]))
 
 
 def test_picard_stage_matches_nonlinear_residual_at_freeze_point() -> None:
