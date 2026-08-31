@@ -250,3 +250,15 @@ rules out both more fixed-point sweeps and an unpreconditioned monolithic JFNK
 swap as useful next steps.  It does not prove that the discrete system has no
 root; the remaining defensible work is an equation/boundary audit or a
 physics-based block preconditioner, still on N8 only.
+
+That block-preconditioner test is now complete.  It reuses the seven frozen
+equation-(63) interior matrices from the segregated solver while deliberately
+leaving density/SIMPLE, wall, corner and mass rows as identity rows.  On the
+same sweep-23 N8 checkpoint, seven block factorizations and eight Krylov outer
+iterations use 310 residual evaluations.  The first trial raises the objective
+from `5.362940e-3` to `5.648190e-3`; subsequent trials are approximately
+`3.1e-2`.  The fail-closed oracle therefore returns the initial checkpoint.
+This rejects an interior-field block diagonal as the missing ingredient and
+localizes the remaining algebraic problem to the omitted coupled carrier and
+boundary rows.  A larger work budget, N16, or another interior relaxation
+experiment is not authorized.

@@ -13,8 +13,15 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.optimize import root
+from scipy.sparse.linalg import LinearOperator
 
 from r26_discretization import R26NodeBVP
+from r26_gu_emerson_reconstruction import (
+    FIELD_SLOTS,
+    GuEmersonReconstructionOptions,
+    _SegregatedReconstructionOperators,
+    _interior_flat_indices,
+)
 from r26_gu_emerson_transformed_fv import gu_emerson_transformed_fv_residual
 from r26_gu_emerson_variables import (
     GuEmersonFields,
@@ -31,6 +38,7 @@ class GuEmersonMonolithicOracleOptions:
     max_outer_iterations: int = 8
     invalid_penalty: float = 1.0e8
     display: bool = False
+    use_physics_block_preconditioner: bool = False
 
     def __post_init__(self) -> None:
         if not np.isfinite(self.residual_tolerance) or self.residual_tolerance <= 0.0:
@@ -58,7 +66,52 @@ class GuEmersonMonolithicOracleResult:
     function_evaluations: int
     jacobian_evaluations: int
     invalid_evaluations: int
+    preconditioner_block_factorizations: int
     message: str
+
+
+class GuEmersonPhysicsBlockPreconditioner(LinearOperator):
+    """Approximate inverse assembled from the seven equation-(63) blocks.
+
+    The interior field matrices are exactly the frozen Picard matrices used
+    by the segregated reconstruction.  Density/SIMPLE, wall, corner and mass
+    rows remain identity rows, so this diagnostic never invents an
+    unpublished boundary Jacobian or silently changes the square residual.
+    """
+
+    def __init__(self, problem: R26NodeBVP, fields: GuEmersonFields) -> None:
+        packed = gu_emerson_fields_as_planar17(fields)
+        size = packed.size
+        options = GuEmersonReconstructionOptions.asme2009_equation63_source_backed(
+            max_outer_iterations=1,
+            scalar_block_safeguard=False,
+            outer_anderson_acceleration=False,
+            outer_sweep_safeguard=False,
+        )
+        operators = _SegregatedReconstructionOperators(problem, options)
+        self._blocks: list[tuple[np.ndarray, np.ndarray, object]] = []
+        for stage, slots in FIELD_SLOTS.items():
+            operators._solve_field(fields, stage)
+            factor = operators._block_factors.get(stage)
+            if factor is None:
+                raise RuntimeError(
+                    f"physics preconditioner requires a nonsingular {stage} block"
+                )
+            indices = _interior_flat_indices(problem.case.nodes, slots)
+            scales = np.tile(
+                problem.case.scaling.bulk[list(slots)],
+                (problem.case.nodes - 2) ** 2,
+            )
+            self._blocks.append((indices, scales, factor))
+        self.block_factorizations = operators.block_factorizations
+        super().__init__(dtype=float, shape=(size, size))
+
+    def _matvec(self, residual: np.ndarray) -> np.ndarray:
+        value = np.asarray(residual, dtype=float)
+        correction = value.copy()
+        for indices, scales, factor in self._blocks:
+            correction[indices] = factor.solve(value[indices] / scales)
+        return correction
 
 
 class EncodedGuEmersonMonolithicObjective:
@@ -120,6 +173,12 @@ def solve_gu_emerson_monolithic_oracle(
         problem, transform, options.invalid_penalty
     )
     initial_objective_linf = float(np.max(np.abs(objective(x0))))
+    preconditioner = (
+        GuEmersonPhysicsBlockPreconditioner(problem, initial_fields)
+        if options.use_physics_block_preconditioner
+        and initial_objective_linf > options.residual_tolerance
+        else None
+    )
     best_vector = x0.copy()
     best_objective_linf = initial_objective_linf
     best_outer_iteration = 0
@@ -145,7 +204,10 @@ def solve_gu_emerson_monolithic_oracle(
             "maxiter": options.max_outer_iterations,
             "line_search": "armijo",
             "disp": options.display,
-            "jac_options": {"inner_maxiter": 12},
+            "jac_options": {
+                "inner_maxiter": 12,
+                **({"inner_M": preconditioner} if preconditioner is not None else {}),
+            },
         },
     )
     final_packed = transform.decode(best_vector)
@@ -187,6 +249,9 @@ def solve_gu_emerson_monolithic_oracle(
         function_evaluations=int(result.nfev),
         jacobian_evaluations=0,
         invalid_evaluations=objective.invalid_evaluations,
+        preconditioner_block_factorizations=(
+            0 if preconditioner is None else preconditioner.block_factorizations
+        ),
         message=(
             f"{result.message}; returning best monolithic iterate "
             f"{best_outer_iteration}"
@@ -196,6 +261,7 @@ def solve_gu_emerson_monolithic_oracle(
 
 __all__ = [
     "EncodedGuEmersonMonolithicObjective",
+    "GuEmersonPhysicsBlockPreconditioner",
     "GuEmersonMonolithicOracleOptions",
     "GuEmersonMonolithicOracleResult",
     "solve_gu_emerson_monolithic_oracle",
