@@ -5,8 +5,10 @@ import numpy as np
 from r26_cases import gu_asme2009_cavity_case
 from r26_gu_emerson_monolithic_oracle import (
     EncodedGuEmersonMonolithicObjective,
+    GuEmersonColoredNewtonOracleOptions,
     GuEmersonMonolithicOracleOptions,
     GuEmersonPhysicsBlockPreconditioner,
+    solve_gu_emerson_colored_newton_oracle,
     solve_gu_emerson_monolithic_oracle,
 )
 from r26_gu_emerson_reconstruction import make_gu_emerson_reconstruction_problem
@@ -62,6 +64,15 @@ def test_monolithic_oracle_converges_without_work_at_equilibrium() -> None:
     assert preconditioned.objective_linf == 0.0
     assert preconditioned.preconditioner_block_factorizations == 0
 
+    colored = solve_gu_emerson_colored_newton_oracle(
+        make_gu_emerson_reconstruction_problem(case),
+        fields,
+        options=GuEmersonColoredNewtonOracleOptions(max_jacobian_builds=1),
+    )
+    assert colored.converged
+    assert colored.objective_linf == 0.0
+    assert colored.jacobian_builds == 0
+
 
 def test_physics_block_preconditioner_is_finite_and_owns_only_interior_fields() -> None:
     case = replace(
@@ -106,3 +117,12 @@ def test_monolithic_oracle_blocks_grids_above_n8() -> None:
         assert "restricted to N8" in str(exc)
     else:
         raise AssertionError("oracle must remain blocked above N8")
+
+    try:
+        solve_gu_emerson_colored_newton_oracle(
+            make_gu_emerson_reconstruction_problem(case), fields
+        )
+    except ValueError as exc:
+        assert "restricted to N8" in str(exc)
+    else:
+        raise AssertionError("colored Newton oracle must remain blocked above N8")

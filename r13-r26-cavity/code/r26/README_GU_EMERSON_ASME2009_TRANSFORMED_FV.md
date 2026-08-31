@@ -262,3 +262,25 @@ This rejects an interior-field block diagonal as the missing ingredient and
 localizes the remaining algebraic problem to the omitted coupled carrier and
 boundary rows.  A larger work budget, N16, or another interior relaxation
 experiment is not authorized.
+
+The complete N8 transformed Jacobian has now been built with the repository's
+radius-two colored sparsity and absolute finite-difference floor.  It contains
+1088 unknowns and 334123 numerical nonzeros and is numerically full rank
+(`1088/1088`).  After deterministic row/column max-norm scaling, its smallest
+singular value is `4.427686e-3` and its reciprocal condition estimate is
+`4.609959e-4`.  The stall is therefore not a pressure null space or algebraic
+rank defect.  The weakest left singular vector is 92.72% wall-supported and
+42.25% `gamma_xy`; the weakest right vector is 56.30% wall-supported and
+48.26% `gamma_xy`.  This independently confirms a wall--`gamma_xy` coupling
+problem rather than a missing interior block solve.
+
+A bounded full colored-Jacobian Newton oracle then tests whether exact linear
+solves can exploit that full rank.  Three Jacobian builds use 1439 objective
+evaluations and accept only steps `1/64`, `1/128`, and `1/512`.  The objective
+falls from `5.362940e-3` to `5.357921e-3`, with no invalid evaluations, but the
+complete physical raw gate remains `5.360998e-3`.  This proves that a descent
+direction exists while also rejecting a blind extension of full Newton: its
+local model is valid only at vanishing step lengths and the measured progress
+is many orders too slow for the `1e-8` gate.  The next N8 audit must resolve
+the wall `gamma_xy` rows by side and boundary equation before changing the
+solver again.  N16 remains blocked.

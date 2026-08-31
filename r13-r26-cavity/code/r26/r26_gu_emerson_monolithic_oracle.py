@@ -13,9 +13,11 @@ from dataclasses import dataclass
 
 import numpy as np
 from scipy.optimize import root
-from scipy.sparse.linalg import LinearOperator
+from scipy.optimize._numdiff import approx_derivative
+from scipy.sparse.linalg import LinearOperator, splu
 
 from r26_discretization import R26NodeBVP
+from r26_fv_backend import fv_absolute_difference_step
 from r26_gu_emerson_reconstruction import (
     FIELD_SLOTS,
     GuEmersonReconstructionOptions,
@@ -29,7 +31,7 @@ from r26_gu_emerson_variables import (
     gu_emerson_fields_from_planar17,
     state_from_gu_emerson_fields,
 )
-from r26_solver import LogStateTransform
+from r26_solver import LogStateTransform, jacobian_sparsity
 
 
 @dataclass(frozen=True)
@@ -67,6 +69,40 @@ class GuEmersonMonolithicOracleResult:
     jacobian_evaluations: int
     invalid_evaluations: int
     preconditioner_block_factorizations: int
+    message: str
+
+
+@dataclass(frozen=True)
+class GuEmersonColoredNewtonOracleOptions:
+    residual_tolerance: float = 1.0e-10
+    max_jacobian_builds: int = 3
+    minimum_step: float = 1.0 / 8192.0
+    invalid_penalty: float = 1.0e8
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.residual_tolerance) or self.residual_tolerance <= 0.0:
+            raise ValueError("colored Newton tolerance must be finite and positive")
+        if self.max_jacobian_builds < 1:
+            raise ValueError("colored Newton Jacobian budget must be positive")
+        if not np.isfinite(self.minimum_step) or not (0.0 < self.minimum_step <= 1.0):
+            raise ValueError("colored Newton minimum step must lie in (0,1]")
+
+
+@dataclass(frozen=True)
+class GuEmersonColoredNewtonOracleResult:
+    fields: GuEmersonFields
+    state: np.ndarray
+    converged: bool
+    objective_linf: float
+    initial_objective_linf: float
+    transformed_linf: float
+    physical_raw_linf: float
+    held_continuity: float
+    mass_error: float
+    jacobian_builds: int
+    function_evaluations: int
+    invalid_evaluations: int
+    accepted_steps: tuple[float, ...]
     message: str
 
 
@@ -259,10 +295,116 @@ def solve_gu_emerson_monolithic_oracle(
     )
 
 
+def solve_gu_emerson_colored_newton_oracle(
+    problem: R26NodeBVP,
+    initial_fields: GuEmersonFields,
+    *,
+    options: GuEmersonColoredNewtonOracleOptions | None = None,
+) -> GuEmersonColoredNewtonOracleResult:
+    """Run a bounded full colored-Jacobian Newton diagnostic on N8."""
+
+    options = GuEmersonColoredNewtonOracleOptions() if options is None else options
+    if problem.case.nodes > 8:
+        raise ValueError("colored Newton diagnostic oracle is restricted to N8")
+    transform = LogStateTransform(problem.shape)
+    vector = transform.encode(gu_emerson_fields_as_planar17(initial_fields))
+    objective = EncodedGuEmersonMonolithicObjective(
+        problem, transform, options.invalid_penalty
+    )
+    evaluations = 0
+
+    def sampled(candidate: np.ndarray) -> np.ndarray:
+        nonlocal evaluations
+        evaluations += 1
+        return objective(candidate)
+
+    residual = sampled(vector)
+    initial_linf = float(np.max(np.abs(residual)))
+    merit = initial_linf
+    accepted_steps: list[float] = []
+    jacobian_builds = 0
+    converged = merit <= options.residual_tolerance
+    message = "initial checkpoint satisfies the colored Newton tolerance"
+    pattern = jacobian_sparsity(problem)
+    while not converged and jacobian_builds < options.max_jacobian_builds:
+        jacobian = approx_derivative(
+            sampled,
+            vector,
+            method="2-point",
+            abs_step=fv_absolute_difference_step(vector),
+            sparsity=pattern,
+        ).tocsc()
+        jacobian_builds += 1
+        try:
+            correction = splu(jacobian).solve(-residual)
+        except RuntimeError:
+            message = "complete colored Jacobian factorization failed"
+            break
+        step = 1.0
+        accepted = False
+        while step >= options.minimum_step:
+            trial_vector = vector + step * correction
+            trial_residual = sampled(trial_vector)
+            trial_merit = float(np.max(np.abs(trial_residual)))
+            if trial_merit < merit:
+                vector = trial_vector
+                residual = trial_residual
+                merit = trial_merit
+                accepted_steps.append(step)
+                accepted = True
+                break
+            step *= 0.5
+        if not accepted:
+            message = "complete colored Newton direction has no descending bounded step"
+            break
+        converged = merit <= options.residual_tolerance
+        message = (
+            "complete colored Newton residual tolerance reached"
+            if converged
+            else "bounded complete colored Newton Jacobian budget exhausted"
+        )
+
+    packed = transform.decode(vector)
+    fields = gu_emerson_fields_from_planar17(packed)
+    case = problem.case
+    state = state_from_gu_emerson_fields(
+        fields, x=case.x, y=case.y, mu=case.mu(fields.theta)
+    )
+    diagnostics = problem.evaluate(state).diagnostics
+    transformed = gu_emerson_transformed_fv_residual(fields, case=case)
+    transformed_linf = float(np.max(np.abs(transformed[1:-1, 1:-1])))
+    physical_raw = float(
+        max(
+            diagnostics.raw_total_linf,
+            abs(diagnostics.held_out_continuity),
+            abs(diagnostics.mass_error),
+        )
+    )
+    return GuEmersonColoredNewtonOracleResult(
+        fields=fields,
+        state=state,
+        converged=converged,
+        objective_linf=merit,
+        initial_objective_linf=initial_linf,
+        transformed_linf=transformed_linf,
+        physical_raw_linf=physical_raw,
+        held_continuity=float(diagnostics.held_out_continuity),
+        mass_error=float(diagnostics.mass_error),
+        jacobian_builds=jacobian_builds,
+        function_evaluations=evaluations,
+        invalid_evaluations=objective.invalid_evaluations,
+        accepted_steps=tuple(accepted_steps),
+        message=message,
+    )
+
+
 __all__ = [
     "EncodedGuEmersonMonolithicObjective",
+    "GuEmersonColoredNewtonOracleOptions",
+    "GuEmersonColoredNewtonOracleResult",
     "GuEmersonPhysicsBlockPreconditioner",
     "GuEmersonMonolithicOracleOptions",
     "GuEmersonMonolithicOracleResult",
     "solve_gu_emerson_monolithic_oracle",
+    "solve_gu_emerson_colored_newton_oracle",
 ]
