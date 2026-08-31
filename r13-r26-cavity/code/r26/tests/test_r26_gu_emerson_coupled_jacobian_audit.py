@@ -19,6 +19,13 @@ def test_scaled_coupled_audit_detects_and_localizes_one_null_direction() -> None
     assert report.scaled_reciprocal_condition < 1.0e-14
     assert np.isclose(sum(value for _, value in report.weakest_unknown_slot_energy), 1.0)
     assert np.isclose(sum(value for _, value in report.weakest_unknown_region_energy), 1.0)
+    wall_total = dict(report.weakest_equation_region_energy)["wall"]
+    assert np.isclose(
+        sum(value for _, value in report.weakest_wall_equation_energy), wall_total
+    )
+    assert len(report.weakest_wall_equation_energy) == 17
+    assert all(0 <= index < nodes for index in report.dominant_unknown_location[:2])
+    assert 0 <= report.dominant_unknown_location[2] < 17
 
 
 def test_coupled_jacobian_audit_blocks_grids_above_n8() -> None:

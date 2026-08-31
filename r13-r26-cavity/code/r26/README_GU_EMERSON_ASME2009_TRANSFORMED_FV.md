@@ -269,10 +269,12 @@ radius-two colored sparsity and absolute finite-difference floor.  It contains
 (`1088/1088`).  After deterministic row/column max-norm scaling, its smallest
 singular value is `4.427686e-3` and its reciprocal condition estimate is
 `4.609959e-4`.  The stall is therefore not a pressure null space or algebraic
-rank defect.  The weakest left singular vector is 92.72% wall-supported and
-42.25% `gamma_xy`; the weakest right vector is 56.30% wall-supported and
-48.26% `gamma_xy`.  This independently confirms a wall--`gamma_xy` coupling
-problem rather than a missing interior block solve.
+rank defect.  The weakest left singular vector is 92.72% wall-supported.  Its
+dominant boundary row is slot 10, which the boundary assembly maps to
+`C8_Delta` (not the bulk slot-10 name `gamma_xy`).  The weakest right vector
+is 56.30% wall-supported and 48.26% `gamma_xy`.  This independently identifies
+a weak wall-`C8_Delta`/unknown-`gamma_xy` coupling rather than a missing
+interior block solve.
 
 A bounded full colored-Jacobian Newton oracle then tests whether exact linear
 solves can exploit that full rank.  Three Jacobian builds use 1439 objective
@@ -284,3 +286,12 @@ local model is valid only at vanishing step lengths and the measured progress
 is many orders too slow for the `1e-8` gate.  The next N8 audit must resolve
 the wall `gamma_xy` rows by side and boundary equation before changing the
 solver again.  N16 remains blocked.
+
+Correct interpretation of the boundary row layout is essential here: slots
+0--10 are the ordered smooth-wall equations and slots 11--16 are free-moment
+extrapolations.  A side-resolved repeat finds 86.97% of the weakest equation
+energy on the left wall, including 41.02% in `C8_Delta`, while the weakest
+unknown energy lies mainly on the moving top wall (32.49%) and left wall
+(22.66%) and remains dominated by transformed `gamma_xy`.  The remaining
+audit target is therefore the top-left wall/corner stencil, not a generic
+domain-wide conditioning problem.

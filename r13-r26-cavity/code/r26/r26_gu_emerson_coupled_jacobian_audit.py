@@ -13,6 +13,7 @@ from r26_fv_backend import fv_absolute_difference_step
 from r26_gu_emerson_monolithic_oracle import EncodedGuEmersonMonolithicObjective
 from r26_gu_emerson_variables import GuEmersonFields, gu_emerson_fields_as_planar17
 from r26_solver import LogStateTransform, jacobian_sparsity
+from r26_wall_conditions import WALL_EQUATION_ORDER
 
 
 TRANSFORMED_SLOT_NAMES = (
@@ -34,6 +35,14 @@ TRANSFORMED_SLOT_NAMES = (
     "omega_yyy",
     "chi",
 )
+WALL_ROW_NAMES = WALL_EQUATION_ORDER + (
+    "extrap_pressure",
+    "extrap_sigma_nt",
+    "extrap_q_n",
+    "extrap_m_nnn",
+    "extrap_m_ntt",
+    "extrap_R_nt",
+)
 
 
 @dataclass(frozen=True)
@@ -51,12 +60,19 @@ class GuEmersonCoupledJacobianReport:
     full_rank: bool
     weakest_unknown_slot_energy: tuple[tuple[str, float], ...]
     weakest_unknown_region_energy: tuple[tuple[str, float], ...]
-    weakest_equation_slot_energy: tuple[tuple[str, float], ...]
+    weakest_unknown_side_energy: tuple[tuple[str, float], ...]
     weakest_equation_region_energy: tuple[tuple[str, float], ...]
+    weakest_equation_side_energy: tuple[tuple[str, float], ...]
+    weakest_bulk_equation_energy: tuple[tuple[str, float], ...]
+    weakest_wall_equation_energy: tuple[tuple[str, float], ...]
     dominant_unknown_slot: str
     dominant_unknown_region: str
-    dominant_equation_slot: str
+    dominant_unknown_side: str
     dominant_equation_region: str
+    dominant_equation_side: str
+    dominant_wall_equation: str
+    dominant_unknown_location: tuple[int, int, int]
+    dominant_equation_location: tuple[int, int, int]
 
 
 def _normalized_energy(values: np.ndarray) -> np.ndarray:
@@ -86,6 +102,36 @@ def _region_energy(vector: np.ndarray, nodes: int) -> tuple[tuple[str, float], .
     return (("bulk", interior), ("wall", wall), ("corner", corners))
 
 
+def _side_energy(vector: np.ndarray, nodes: int) -> tuple[tuple[str, float], ...]:
+    energy = _normalized_energy(vector.reshape(nodes, nodes, 17))
+    return (
+        ("left", float(np.sum(energy[1:-1, 0]))),
+        ("right", float(np.sum(energy[1:-1, -1]))),
+        ("bottom", float(np.sum(energy[0, 1:-1]))),
+        ("top", float(np.sum(energy[-1, 1:-1]))),
+    )
+
+
+def _equation_energy(
+    vector: np.ndarray, nodes: int, *, region: str
+) -> tuple[tuple[str, float], ...]:
+    energy = _normalized_energy(vector.reshape(nodes, nodes, 17))
+    if region == "bulk":
+        values = np.sum(energy[1:-1, 1:-1], axis=(0, 1))
+        names = TRANSFORMED_SLOT_NAMES
+    elif region == "wall":
+        values = (
+            np.sum(energy[1:-1, 0], axis=0)
+            + np.sum(energy[1:-1, -1], axis=0)
+            + np.sum(energy[0, 1:-1], axis=0)
+            + np.sum(energy[-1, 1:-1], axis=0)
+        )
+        names = WALL_ROW_NAMES
+    else:
+        raise ValueError("equation energy region must be bulk or wall")
+    return tuple((name, float(values[index])) for index, name in enumerate(names))
+
+
 def analyze_scaled_coupled_matrix(
     matrix: np.ndarray, *, nodes: int
 ) -> GuEmersonCoupledJacobianReport:
@@ -109,8 +155,23 @@ def analyze_scaled_coupled_matrix(
     rank = int(np.count_nonzero(singular > tolerance))
     unknown_slots = _slot_energy(right_transpose[-1], nodes)
     unknown_regions = _region_energy(right_transpose[-1], nodes)
-    equation_slots = _slot_energy(left[:, -1], nodes)
+    unknown_sides = _side_energy(right_transpose[-1], nodes)
     equation_regions = _region_energy(left[:, -1], nodes)
+    equation_sides = _side_energy(left[:, -1], nodes)
+    bulk_equations = _equation_energy(left[:, -1], nodes, region="bulk")
+    wall_equations = _equation_energy(left[:, -1], nodes, region="wall")
+    unknown_location = tuple(
+        int(index)
+        for index in np.unravel_index(
+            np.argmax(np.abs(right_transpose[-1])), (nodes, nodes, 17)
+        )
+    )
+    equation_location = tuple(
+        int(index)
+        for index in np.unravel_index(
+            np.argmax(np.abs(left[:, -1])), (nodes, nodes, 17)
+        )
+    )
     return GuEmersonCoupledJacobianReport(
         unknown_count=expected,
         numerical_rank=rank,
@@ -125,12 +186,19 @@ def analyze_scaled_coupled_matrix(
         full_rank=rank == expected,
         weakest_unknown_slot_energy=unknown_slots,
         weakest_unknown_region_energy=unknown_regions,
-        weakest_equation_slot_energy=equation_slots,
+        weakest_unknown_side_energy=unknown_sides,
         weakest_equation_region_energy=equation_regions,
+        weakest_equation_side_energy=equation_sides,
+        weakest_bulk_equation_energy=bulk_equations,
+        weakest_wall_equation_energy=wall_equations,
         dominant_unknown_slot=max(unknown_slots, key=lambda item: item[1])[0],
         dominant_unknown_region=max(unknown_regions, key=lambda item: item[1])[0],
-        dominant_equation_slot=max(equation_slots, key=lambda item: item[1])[0],
+        dominant_unknown_side=max(unknown_sides, key=lambda item: item[1])[0],
         dominant_equation_region=max(equation_regions, key=lambda item: item[1])[0],
+        dominant_equation_side=max(equation_sides, key=lambda item: item[1])[0],
+        dominant_wall_equation=max(wall_equations, key=lambda item: item[1])[0],
+        dominant_unknown_location=unknown_location,
+        dominant_equation_location=equation_location,
     )
 
 
@@ -180,6 +248,7 @@ def audit_gu_emerson_coupled_jacobian(
 __all__ = [
     "GuEmersonCoupledJacobianReport",
     "TRANSFORMED_SLOT_NAMES",
+    "WALL_ROW_NAMES",
     "analyze_scaled_coupled_matrix",
     "audit_gu_emerson_coupled_jacobian",
 ]
