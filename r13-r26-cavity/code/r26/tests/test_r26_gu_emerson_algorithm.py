@@ -5,6 +5,7 @@ from dataclasses import replace
 import numpy as np
 
 from r26_cases import rana_first_case
+from r26_discretization import R26NodeBVP
 from r26_gu_emerson_algorithm import (
     GU_EMERSON_STAGE_ORDER,
     GuEmersonAlgorithmDisclosure,
@@ -14,11 +15,13 @@ from r26_gu_emerson_algorithm import (
     gu_emerson_field_equations,
 )
 from r26_gu_emerson_variables import (
+    GuEmersonLogStateTransform,
     gu_emerson_fields_as_planar17,
     gu_emerson_fields_from_state,
     gu_emerson_fields_from_planar17,
     state_from_gu_emerson_fields,
 )
+from r26_solver import SolveOptions, solve_r26_bvp
 
 
 def _smooth_state(nodes: int = 7) -> tuple[object, np.ndarray]:
@@ -45,6 +48,32 @@ def test_gu_emerson_equation48_variable_mapping_round_trips_physical_state() -> 
     fields = gu_emerson_fields_from_state(state, x=case.x, y=case.y, mu=mu)
     rebuilt = state_from_gu_emerson_fields(fields, x=case.x, y=case.y, mu=mu)
     assert np.allclose(rebuilt, state, rtol=2.0e-12, atol=3.0e-12)
+
+
+def test_gu_emerson_log_newton_coordinates_round_trip_the_physical_state() -> None:
+    case, state = _smooth_state()
+    transform = GuEmersonLogStateTransform(case)
+    rebuilt = transform.decode(transform.encode(state))
+    assert np.allclose(rebuilt, state, rtol=2.0e-12, atol=6.0e-12)
+    assert transform.supports_physical_pseudo_transient is False
+
+
+def test_stateless_solver_accepts_gu_emerson_coordinates_at_equilibrium() -> None:
+    case = replace(rana_first_case(5), lid_velocity=0.0)
+    initial = case.equilibrium_state()
+    result = solve_r26_bvp(
+        R26NodeBVP(case),
+        initial,
+        options=SolveOptions(
+            method="colored_newton",
+            residual_tolerance=1.0e-12,
+            jacobian_stencil_radius=4,
+            max_iterations=1,
+        ),
+        state_transform=GuEmersonLogStateTransform(case),
+    )
+    assert result.converged
+    assert np.array_equal(result.state, initial)
 
 
 def test_gu_emerson_uniform_equilibrium_has_zero_non_gradient_fields() -> None:

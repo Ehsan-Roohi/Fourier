@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Protocol
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
@@ -21,12 +21,32 @@ from r26_fv_backend import fv_absolute_difference_step
 from r26_state import NVAR, validate_planar_state
 
 
+class R26StateTransform(Protocol):
+    """Coordinate map accepted by the stateless nonlinear solver.
+
+    Implementations retain the planar-17 vector layout, encode density and
+    temperature logarithmically, and reconstruct a physical R26 state in
+    :meth:`decode`.  The latter permits Newton iterations in alternative
+    primary variables without changing any residual or acceptance row.
+    """
+
+    shape: tuple[int, int, int]
+    supports_physical_pseudo_transient: bool
+
+    def encode(self, state: np.ndarray) -> np.ndarray: ...
+
+    def decode(self, vector: np.ndarray) -> np.ndarray: ...
+
+    def least_squares_bounds(self) -> tuple[np.ndarray, np.ndarray]: ...
+
+
 @dataclass(frozen=True)
 class LogStateTransform:
     """Logarithmic rho/T coordinates and raw coordinates for all other fields."""
 
     shape: tuple[int, int, int]
     maximum_log_magnitude: float = 50.0
+    supports_physical_pseudo_transient: bool = True
 
     def __post_init__(self) -> None:
         if len(self.shape) != 3 or self.shape[-1] != NVAR:
@@ -84,6 +104,7 @@ class SolveOptions:
     pseudo_time_growth_limit: float = 2.0
     newton_switch_tolerance: float = 1.0e-6
     max_jacobian_evaluations: int | None = None
+    jacobian_stencil_radius: int = 2
 
     def __post_init__(self) -> None:
         if self.method not in {"krylov", "least_squares", "colored_newton"}:
@@ -114,6 +135,8 @@ class SolveOptions:
             raise ValueError("pseudo_time_growth_limit must be at least one")
         if self.max_jacobian_evaluations is not None and self.max_jacobian_evaluations < 1:
             raise ValueError("Jacobian evaluation limit must be positive when supplied")
+        if self.jacobian_stencil_radius < 2:
+            raise ValueError("Jacobian stencil radius must be at least two")
 
 
 @dataclass(frozen=True)
@@ -142,7 +165,7 @@ class _ObjectiveEvaluationLimitReached(RuntimeError):
 class EncodedR26Objective:
     """Pure vector objective plus a finite guard for rejected line-search steps."""
 
-    def __init__(self, problem: R26NodeBVP, transform: LogStateTransform, penalty: float) -> None:
+    def __init__(self, problem: R26NodeBVP, transform: R26StateTransform, penalty: float) -> None:
         self.problem = problem
         self.transform = transform
         self.penalty = float(penalty)
@@ -185,7 +208,7 @@ class EncodedR26MassContinuityObjective:
     is removed, duplicated, or converted into a penalty.
     """
 
-    def __init__(self, problem: R26NodeBVP, transform: LogStateTransform, penalty: float) -> None:
+    def __init__(self, problem: R26NodeBVP, transform: R26StateTransform, penalty: float) -> None:
         self.problem = problem
         self.transform = transform
         self.penalty = float(penalty)
@@ -234,7 +257,7 @@ class EncodedR26RawMassContinuityObjective:
     no penalty/regularization row is added for a valid state.
     """
 
-    def __init__(self, problem: R26NodeBVP, transform: LogStateTransform, penalty: float) -> None:
+    def __init__(self, problem: R26NodeBVP, transform: R26StateTransform, penalty: float) -> None:
         self.problem = problem
         self.transform = transform
         self.penalty = float(penalty)
@@ -332,7 +355,7 @@ def residual_family_row_scales(
 
 def analytic_mass_jacobian_row(
     problem: R26NodeBVP,
-    transform: LogStateTransform,
+    transform: R26StateTransform,
     encoded_state: np.ndarray,
 ) -> tuple[int, np.ndarray, np.ndarray]:
     """Return the exact bordered-mass row in logarithmic solver coordinates.
@@ -366,7 +389,7 @@ def analytic_mass_jacobian_row(
 
 def pseudo_transient_diagonal(
     problem: R26NodeBVP,
-    transform: LogStateTransform,
+    transform: R26StateTransform,
     encoded_state: np.ndarray,
 ) -> np.ndarray:
     """Return the scaled pseudo-mass diagonal for physical bulk rows only.
@@ -498,6 +521,7 @@ def solve_r26_bvp(
     initial_state: np.ndarray,
     *,
     options: SolveOptions | None = None,
+    state_transform: R26StateTransform | None = None,
 ) -> R26SolveResult:
     """Solve one fixed case from one explicit initial state.
 
@@ -507,7 +531,19 @@ def solve_r26_bvp(
     """
 
     options = SolveOptions() if options is None else options
-    transform = LogStateTransform(problem.shape)
+    transform = (
+        LogStateTransform(problem.shape)
+        if state_transform is None
+        else state_transform
+    )
+    if transform.shape != problem.shape:
+        raise ValueError("state transform and R26 problem shapes must match")
+    if options.pseudo_transient and not bool(
+        getattr(transform, "supports_physical_pseudo_transient", False)
+    ):
+        raise ValueError(
+            "selected state transform does not define the physical pseudo-time diagonal"
+        )
     x0 = transform.encode(initial_state)
     objective = EncodedR26Objective(problem, transform, options.invalid_penalty)
     jacobian_evaluations = 0
@@ -535,7 +571,13 @@ def solve_r26_bvp(
         # and a direct dense trust-region solve is faster/more accurate.  From
         # N=7 onward colored finite differences avoid the quadratic number of
         # residual calls.
-        sparsity = None if problem.case.nodes <= 6 else jacobian_sparsity(problem)
+        sparsity = (
+            None
+            if problem.case.nodes <= 6
+            else jacobian_sparsity(
+                problem, stencil_radius=options.jacobian_stencil_radius
+            )
+        )
         result = least_squares(
             objective,
             x0,
@@ -563,6 +605,7 @@ def solve_r26_bvp(
         lower, upper = transform.least_squares_bounds()
         pattern = jacobian_sparsity(
             problem,
+            stencil_radius=options.jacobian_stencil_radius,
             include_mass_border=not options.analytic_mass_jacobian,
         )
         encoded = x0.copy()
@@ -967,6 +1010,7 @@ __all__ = [
     "EncodedR26MassContinuityObjective",
     "EncodedR26RawMassContinuityObjective",
     "LogStateTransform",
+    "R26StateTransform",
     "R26SolveResult",
     "SolveOptions",
     "interpolate_state_grid",

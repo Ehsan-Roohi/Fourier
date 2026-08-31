@@ -27,7 +27,14 @@ from typing import Final
 
 import numpy as np
 
-from r26_state import StateTensors, planar_state_to_tensors, tensors_to_planar_state
+from r26_cases import CavityCase
+from r26_state import (
+    NVAR,
+    StateTensors,
+    planar_state_to_tensors,
+    tensors_to_planar_state,
+    validate_planar_state,
+)
 from r26_tensor_closures import stf2_project, stf3_project
 
 
@@ -323,9 +330,81 @@ def gu_emerson_fields_from_planar17(packed: np.ndarray) -> GuEmersonFields:
     )
 
 
+@dataclass(frozen=True)
+class GuEmersonLogStateTransform:
+    """Newton coordinates for the printed Gu--Emerson primary variables.
+
+    Density and temperature retain the repository's positivity-preserving
+    logarithms.  The other fifteen slots store ``u,g,h,omega,gamma,chi`` in
+    planar-17 order.  Decoding reconstructs the physical moments through
+    equations (48)--(55), so a physical R26 residual can be solved without
+    treating those moments as the nonlinear unknowns.
+
+    The physical pseudo-time diagonal is deliberately disabled: gradients in
+    the reconstruction make its chain rule non-diagonal in these coordinates.
+    """
+
+    case: CavityCase
+    maximum_log_magnitude: float = 50.0
+    supports_physical_pseudo_transient: bool = False
+
+    def __post_init__(self) -> None:
+        if self.maximum_log_magnitude <= 0.0:
+            raise ValueError("maximum log magnitude must be positive")
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return (self.case.nodes, self.case.nodes, NVAR)
+
+    def encode(self, state: np.ndarray) -> np.ndarray:
+        physical = validate_planar_state(np.asarray(state, dtype=float))
+        if physical.shape != self.shape:
+            raise ValueError(f"state shape must be {self.shape}")
+        fields = gu_emerson_fields_from_state(
+            physical,
+            x=self.case.x,
+            y=self.case.y,
+            mu=self.case.mu(physical[..., 3]),
+        )
+        encoded = gu_emerson_fields_as_planar17(fields)
+        encoded[..., 0] = np.log(encoded[..., 0])
+        encoded[..., 3] = np.log(encoded[..., 3])
+        return encoded.ravel()
+
+    def decode(self, vector: np.ndarray) -> np.ndarray:
+        value = np.asarray(vector, dtype=float)
+        if value.shape != (int(np.prod(self.shape)),) or not np.isfinite(value).all():
+            raise ValueError("encoded transformed state has incorrect shape or non-finite values")
+        packed = value.reshape(self.shape).copy()
+        logs = packed[..., (0, 3)]
+        if np.max(np.abs(logs), initial=0.0) > self.maximum_log_magnitude:
+            raise FloatingPointError(
+                "rho/T log coordinate exceeded the transformed solver domain"
+            )
+        packed[..., 0] = np.exp(packed[..., 0])
+        packed[..., 3] = np.exp(packed[..., 3])
+        fields = gu_emerson_fields_from_planar17(packed)
+        return validate_planar_state(
+            state_from_gu_emerson_fields(
+                fields,
+                x=self.case.x,
+                y=self.case.y,
+                mu=self.case.mu(fields.theta),
+            )
+        )
+
+    def least_squares_bounds(self) -> tuple[np.ndarray, np.ndarray]:
+        lower = np.full(self.shape, -np.inf)
+        upper = np.full(self.shape, np.inf)
+        lower[..., 0] = lower[..., 3] = -self.maximum_log_magnitude
+        upper[..., 0] = upper[..., 3] = self.maximum_log_magnitude
+        return lower.ravel(), upper.ravel()
+
+
 __all__ = [
     "GU_EMERSON_VARIABLE_PROVENANCE",
     "GuEmersonFields",
+    "GuEmersonLogStateTransform",
     "gradient_parts_from_primitive_and_moments",
     "gu_emerson_fields_as_planar17",
     "gu_emerson_fields_from_planar17",

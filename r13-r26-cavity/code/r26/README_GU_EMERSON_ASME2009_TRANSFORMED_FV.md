@@ -343,3 +343,26 @@ Maxwell validator, checks all 17 fields and centreline/global `D/G` metrics,
 replays the candidate independently, and packages every record.  It runs no
 higher grid.  Only a boolean passed record may authorize one bounded N32
 candidate; N40, N44 and production acceptance remain false.
+
+## Conditional JFM Maxwell N32 candidate
+
+After the exact N28 gate passes at the same source commit, the next job may
+attempt one `N=32` state.  `GuEmersonLogStateTransform` makes the printed
+`rho,u,theta,g,h,omega,gamma,chi` fields the Newton coordinates (with
+positivity-preserving logarithms for `rho` and `theta`).  Decoding reconstructs
+the physical moments through equations (48)--(55); the nonlinear objective is
+the unchanged historical compatible central R26 BVP whose equation-(63)
+identity was established at N28.  The two-layer moment reconstruction followed
+by the radius-two physical operator expands the conservative finite-difference
+dependency radius from two to four.  Physical pseudo-time
+diagonal shifting is disabled because its chain rule is not diagonal in these
+coordinates.
+
+`hpc/r26_gu_emerson_jfm_n32_candidate.slurm` replays and independently
+validates N28 before interpolating its accepted transformed candidate.  The
+N32 solve is bounded by 32 Newton iterations, eight coloured Jacobians and
+16,000 objective evaluations.  Acceptance requires the raw physical and
+compatible transformed residuals, all conservation checks, full structural
+rank and the complete 17-field N28-to-N32 comparison.  The job executes no
+grid above N32.  A pass authorizes only one bounded N36 candidate; N40, N44
+and production status remain false.
