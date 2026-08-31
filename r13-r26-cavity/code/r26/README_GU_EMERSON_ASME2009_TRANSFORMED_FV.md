@@ -295,3 +295,26 @@ unknown energy lies mainly on the moving top wall (32.49%) and left wall
 (22.66%) and remains dominated by transformed `gamma_xy`.  The remaining
 audit target is therefore the top-left wall/corner stencil, not a generic
 domain-wide conditioning problem.
+
+That corner-stencil audit is now bounded and resolved.  The default global
+closure gradient makes left-wall `C8_Delta(j=6,i=0)` depend directly on the
+non-paper top-left corner value: the measured derivative with respect to
+corner `gamma_xy(j=7,i=0)` is `-4.364076e-1`.  The diagnostic operator in
+`r26_gu_emerson_corner_closure_audit.py` changes only the eight tangential
+derivatives adjacent to corners, using three smooth-wall nodes and excluding
+the bilinear corner.  It preserves affine manufactured derivatives and makes
+that unwanted derivative exactly zero.  At the sweep-23 N8 checkpoint, the
+target `C8_Delta` row falls from `1.363046e-3` to `2.609383e-4` and the maximum
+smooth-wall residual falls from `4.711014e-3` to `4.298968e-3`.
+
+This is a real local consistency improvement but not the cause of the global
+stall: the complete objective maximum is unchanged at `5.362940e-3` because
+it is an interior transformed `gamma_xy` equation at `(j=6,i=4)`.  Three
+colored-Newton builds with the diagnostic operator accept steps `1/64`,
+`1/128`, and `1/1024` and reach only `5.354918e-3` after 1440 evaluations,
+versus `5.357921e-3` for the declared operator.  That small difference cannot
+justify replacing the production closure stencil with an unpublished corner
+rule.  The new operator therefore remains diagnostic-only, and N16 remains
+blocked.  The next useful N8 target is the first complete Newton direction:
+identify the unknown correction and residual row that reject steps above
+`1/64`, rather than adding relaxation or another corner model.
