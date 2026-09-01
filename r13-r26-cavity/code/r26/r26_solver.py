@@ -103,6 +103,7 @@ class SolveOptions:
     pseudo_time_ser_exponent: float = 1.0
     pseudo_time_growth_limit: float = 2.0
     pseudo_time_minimum_accepted_alpha: float = 0.0
+    pseudo_time_small_alpha_growth: float = 4.0
     newton_switch_tolerance: float = 1.0e-6
     require_raw_linf_decrease: bool = False
     max_jacobian_evaluations: int | None = None
@@ -127,6 +128,7 @@ class SolveOptions:
             self.pseudo_time_maximum,
             self.pseudo_time_ser_exponent,
             self.pseudo_time_growth_limit,
+            self.pseudo_time_small_alpha_growth,
             self.newton_switch_tolerance,
         )
         if not all(np.isfinite(value) and value > 0.0 for value in pseudo_values):
@@ -135,6 +137,8 @@ class SolveOptions:
             raise ValueError("pseudo_time_initial must lie within the declared pseudo-time bounds")
         if self.pseudo_time_growth_limit < 1.0:
             raise ValueError("pseudo_time_growth_limit must be at least one")
+        if self.pseudo_time_small_alpha_growth <= 1.0:
+            raise ValueError("small-alpha pseudo-time growth must exceed one")
         if not 0.0 <= self.pseudo_time_minimum_accepted_alpha <= 1.0:
             raise ValueError("minimum accepted pseudo-time alpha must lie in [0, 1]")
         if self.require_raw_linf_decrease and not self.pseudo_transient:
@@ -954,6 +958,52 @@ def solve_r26_bvp(
                             flush=True,
                         )
                     if use_pseudo_transient:
+                        # At a physical/algebraic R26 boundary, decreasing the
+                        # pseudo-time step does not merely shorten the trial
+                        # step: it changes the direction toward a singular DAE
+                        # limit because wall, corner and mass rows carry no
+                        # pseudo-time term.  If a raw-decreasing step exists but
+                        # only below the declared alpha floor, move toward the
+                        # steady Newton direction instead.  The N32 audit that
+                        # motivated this branch found alpha=1/32 at dt=1e-2,
+                        # then lost every descent direction after dt was
+                        # incorrectly reduced to 6.25e-4 and below.
+                        if rejected_small_alpha:
+                            if pseudo_time_step < options.pseudo_time_maximum:
+                                pseudo_time_step = min(
+                                    options.pseudo_time_maximum,
+                                    options.pseudo_time_small_alpha_growth
+                                    * pseudo_time_step,
+                                )
+                                continue
+                            message = (
+                                "SER pseudo-transient step remained below the alpha "
+                                f"floor at maximum pseudo-time after {linear_solver}"
+                            )
+                            break
+                        # A failed chord direction after one or more accepted
+                        # steps is evidence about the stale Jacobian, not the
+                        # pseudo-time scale.  Refresh at the unchanged state
+                        # before changing dt; otherwise the same obsolete
+                        # direction is retried all the way to the DAE limit.
+                        if chord_steps > 0:
+                            force_jacobian_refresh = True
+                            newton_factorization = None
+                            chord_steps = 0
+                            continue
+                        if options.require_raw_linf_decrease:
+                            if pseudo_time_step < options.pseudo_time_maximum:
+                                pseudo_time_step = min(
+                                    options.pseudo_time_maximum,
+                                    options.pseudo_time_small_alpha_growth
+                                    * pseudo_time_step,
+                                )
+                                continue
+                            message = (
+                                "SER pseudo-transient found no raw-decreasing "
+                                f"step at maximum pseudo-time after {linear_solver}"
+                            )
+                            break
                         if pseudo_time_step > options.pseudo_time_minimum:
                             pseudo_time_step = max(
                                 options.pseudo_time_minimum,
