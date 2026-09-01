@@ -102,7 +102,9 @@ class SolveOptions:
     pseudo_time_maximum: float = 1.0e8
     pseudo_time_ser_exponent: float = 1.0
     pseudo_time_growth_limit: float = 2.0
+    pseudo_time_minimum_accepted_alpha: float = 0.0
     newton_switch_tolerance: float = 1.0e-6
+    require_raw_linf_decrease: bool = False
     max_jacobian_evaluations: int | None = None
     jacobian_stencil_radius: int = 2
 
@@ -133,6 +135,10 @@ class SolveOptions:
             raise ValueError("pseudo_time_initial must lie within the declared pseudo-time bounds")
         if self.pseudo_time_growth_limit < 1.0:
             raise ValueError("pseudo_time_growth_limit must be at least one")
+        if not 0.0 <= self.pseudo_time_minimum_accepted_alpha <= 1.0:
+            raise ValueError("minimum accepted pseudo-time alpha must lie in [0, 1]")
+        if self.require_raw_linf_decrease and not self.pseudo_transient:
+            raise ValueError("raw-Linf line-search protection requires pseudo-transient mode")
         if self.max_jacobian_evaluations is not None and self.max_jacobian_evaluations < 1:
             raise ValueError("Jacobian evaluation limit must be positive when supplied")
         if self.jacobian_stencil_radius < 2:
@@ -171,14 +177,24 @@ class EncodedR26Objective:
         self.penalty = float(penalty)
         self.invalid_evaluations = 0
         self.last_invalid_error: str | None = None
+        self.last_raw_linf = float("inf")
 
     def __call__(self, vector: np.ndarray) -> np.ndarray:
         try:
             state = self.transform.decode(vector)
-            return self.problem.residual(state)
+            evaluation = self.problem.evaluate(state)
+            self.last_raw_linf = float(
+                max(
+                    evaluation.diagnostics.raw_total_linf,
+                    abs(evaluation.diagnostics.held_out_continuity),
+                    abs(evaluation.diagnostics.mass_error),
+                )
+            )
+            return evaluation.flat
         except (FloatingPointError, ValueError, OverflowError) as exc:
             self.invalid_evaluations += 1
             self.last_invalid_error = f"{type(exc).__name__}: {exc}"
+            self.last_raw_linf = float("inf")
             x = np.asarray(vector, dtype=float)
             sign = np.where(np.isfinite(x) & (x < 0.0), -1.0, 1.0)
             magnitude = 1.0 + np.minimum(np.nan_to_num(np.abs(x), nan=100.0, posinf=100.0), 100.0)
@@ -707,6 +723,7 @@ def solve_r26_bvp(
             return objective(vector)
 
         residual = counted(encoded)
+        raw_linf = objective.last_raw_linf
         success = False
         message = "colored sparse Newton iteration limit reached"
         iterations = 0
@@ -723,6 +740,7 @@ def solve_r26_bvp(
                     print(
                         "R26_NEWTON "
                         f"iteration={iteration} residual_linf={residual_linf:.16e} "
+                        f"raw_linf={raw_linf:.16e} "
                         f"jacobians={jacobian_evaluations} evaluations={evaluations} "
                         f"pseudo_time={pseudo_time_step:.16e}",
                         flush=True,
@@ -847,18 +865,38 @@ def solve_r26_bvp(
                 old_residual_linf = residual_linf
                 alpha = 1.0
                 accepted_step = False
+                rejected_small_alpha = False
                 while alpha >= 2.0**-20:
                     trial = np.clip(encoded + alpha * direction, lower, upper)
                     trial_residual = counted(trial)
+                    trial_raw_linf = objective.last_raw_linf
                     trial_merit = 0.5 * float(np.dot(trial_residual, trial_residual))
                     sufficient_decrease = (
                         trial_merit < merit
                         if use_pseudo_transient
                         else trial_merit < merit * (1.0 - 1.0e-4 * alpha)
                     )
-                    if np.isfinite(trial_merit) and sufficient_decrease:
+                    raw_sufficient_decrease = bool(
+                        not options.require_raw_linf_decrease
+                        or trial_raw_linf
+                        < raw_linf * (1.0 - 1.0e-4 * alpha)
+                    )
+                    acceptable_merit = bool(
+                        np.isfinite(trial_merit)
+                        and sufficient_decrease
+                        and raw_sufficient_decrease
+                    )
+                    if (
+                        acceptable_merit
+                        and use_pseudo_transient
+                        and alpha < options.pseudo_time_minimum_accepted_alpha
+                    ):
+                        rejected_small_alpha = True
+                        break
+                    if acceptable_merit:
                         encoded = trial
                         residual = trial_residual
+                        raw_linf = trial_raw_linf
                         accepted_step = True
                         chord_steps += 1
                         if use_pseudo_transient:
@@ -889,6 +927,7 @@ def solve_r26_bvp(
                                 "R26_STEP accepted=true "
                                 f"alpha={alpha:.16e} "
                                 f"residual_linf={float(np.max(np.abs(residual), initial=0.0)):.16e} "
+                                f"raw_linf={raw_linf:.16e} "
                                 f"linear_solver={linear_solver} "
                                 f"pseudo_transient={str(use_pseudo_transient).lower()} "
                                 f"pseudo_time={pseudo_time_step:.16e} "
@@ -906,9 +945,11 @@ def solve_r26_bvp(
                     if options.display:
                         print(
                             "R26_STEP accepted=false "
+                            f"reason={'small_alpha' if rejected_small_alpha else 'merit'} "
                             f"linear_solver={linear_solver} "
                             f"pseudo_transient={str(use_pseudo_transient).lower()} "
                             f"pseudo_time={pseudo_time_step:.16e} "
+                            f"raw_linf={raw_linf:.16e} "
                             f"invalid_evaluations={objective.invalid_evaluations}",
                             flush=True,
                         )

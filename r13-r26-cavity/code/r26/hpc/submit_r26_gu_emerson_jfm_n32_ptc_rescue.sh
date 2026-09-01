@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit the one bounded physical-chain-rule PTC rescue of failed N32.
+# Submit the bounded raw-guarded physical PTC rescue of failed N32.
 
 set -euo pipefail
 
@@ -10,7 +10,7 @@ set -euo pipefail
 }
 
 R26_GE_JFM_N32_FAILED_DIR="${R26_GE_JFM_N32_FAILED_DIR:-/project/pi_roohie_umass_edu/CavityColdToHotIdentify/R26_GU_EMERSON_JFM_N32_20260831_213708}"
-R26_GE_JFM_N32_PTC_OUT="${R26_GE_JFM_N32_PTC_OUT:-/project/pi_roohie_umass_edu/CavityColdToHotIdentify/R26_GU_EMERSON_JFM_N32_PTC_RESCUE_$(date +%Y%m%d_%H%M%S)}"
+R26_GE_JFM_N32_PTC_OUT="${R26_GE_JFM_N32_PTC_OUT:-/project/pi_roohie_umass_edu/CavityColdToHotIdentify/R26_GU_EMERSON_JFM_N32_RAW_GUARDED_PTC_$(date +%Y%m%d_%H%M%S)}"
 test -f "$R26_GE_JFM_N32_FAILED_DIR/N32/JFM_N32_TRANSFORMED_CANDIDATE_GATE.json"
 test -f "$R26_GE_JFM_N32_FAILED_DIR/N32/gu_emerson_jfm_n32_candidate.npz"
 test ! -e "$R26_GE_JFM_N32_PTC_OUT"

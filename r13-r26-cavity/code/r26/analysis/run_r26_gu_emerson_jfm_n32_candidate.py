@@ -249,7 +249,9 @@ def main() -> None:
                 args.failed_n32_dir,
                 case=case,
             )
-            seed_kind = "source_locked_failed_N32_candidate_for_physical_PTC_rescue"
+            seed_kind = (
+                "source_locked_failed_N32_candidate_for_raw_guarded_physical_PTC_rescue"
+            )
         transform = GuEmersonLogStateTransform(case)
         seed_roundtrip = transform.decode(transform.encode(seed))
         seed_roundtrip_linf = float(
@@ -287,7 +289,9 @@ def main() -> None:
             pseudo_time_maximum=1.0e8,
             pseudo_time_ser_exponent=1.0,
             pseudo_time_growth_limit=2.0,
+            pseudo_time_minimum_accepted_alpha=(0.25 if rescue else 0.0),
             newton_switch_tolerance=1.0e-6,
+            require_raw_linf_decrease=rescue,
             display=rescue,
             max_jacobian_evaluations=(
                 RESCUE_MAX_JACOBIANS if rescue else MAX_JACOBIANS

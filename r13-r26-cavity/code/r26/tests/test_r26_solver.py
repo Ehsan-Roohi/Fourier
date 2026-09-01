@@ -147,6 +147,88 @@ def test_full_objective_jvp_matches_exact_linear_mock_direction() -> None:
     assert objective.invalid_evaluations == 0
 
 
+def test_full_objective_caches_the_unscaled_acceptance_gate() -> None:
+    problem = _problem()
+    transform = LogStateTransform(problem.shape)
+    state = problem.case.equilibrium_state()
+    state[..., 0] = 1.1
+    state[2, 2, 16] = 0.2
+    evaluation = problem.evaluate(state)
+    objective = EncodedR26Objective(problem, transform, penalty=1.0e8)
+
+    residual = objective(transform.encode(state))
+    expected_raw_linf = max(
+        evaluation.diagnostics.raw_total_linf,
+        abs(evaluation.diagnostics.held_out_continuity),
+        abs(evaluation.diagnostics.mass_error),
+    )
+
+    assert np.array_equal(residual, evaluation.flat)
+    assert objective.last_raw_linf == expected_raw_linf
+
+
+def test_raw_linf_guard_rejects_a_scaled_descent_that_worsens_raw_gate() -> None:
+    import r26_solver as solver_module
+
+    problem = _problem(nodes=5)
+    state = problem.case.equilibrium_state()
+    state[2, 2, 16] = 0.1
+    initial_encoded = LogStateTransform(problem.shape).encode(state)
+    delta_index = int(np.ravel_multi_index((2, 2, 16), problem.shape))
+
+    class OpposedRawObjective:
+        def __init__(self, problem: object, transform: object, penalty: float) -> None:
+            del problem, transform, penalty
+            self.invalid_evaluations = 0
+            self.last_invalid_error = None
+            self.last_raw_linf = float("inf")
+
+        def __call__(self, vector: np.ndarray) -> np.ndarray:
+            value = float(vector[delta_index])
+            residual = np.zeros_like(vector)
+            residual[delta_index] = value
+            # The scaled objective descends toward value=0, while the raw
+            # acceptance gate strictly worsens from its initial value of one.
+            self.last_raw_linf = 1.1 - value
+            return residual
+
+    with patch.object(solver_module, "EncodedR26Objective", OpposedRawObjective):
+        result = solve_r26_bvp(
+            problem,
+            state,
+            options=SolveOptions(
+                method="colored_newton",
+                residual_tolerance=1.0e-12,
+                held_out_continuity_tolerance=1.0e-12,
+                max_iterations=1,
+                pseudo_transient=True,
+                pseudo_time_initial=1.0e8,
+                pseudo_time_maximum=1.0e8,
+                require_raw_linf_decrease=True,
+                max_jacobian_evaluations=1,
+            ),
+        )
+
+    assert np.array_equal(result.encoded_state, initial_encoded)
+    assert result.pseudo_transient_steps == 0
+    assert result.final_pseudo_time_step == 2.5e7
+
+
+def test_raw_guard_options_are_fail_closed() -> None:
+    invalid_options = (
+        {"pseudo_time_minimum_accepted_alpha": -0.1},
+        {"pseudo_time_minimum_accepted_alpha": 1.1},
+        {"require_raw_linf_decrease": True},
+    )
+    for values in invalid_options:
+        try:
+            SolveOptions(**values)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"SolveOptions unexpectedly accepted {values}")
+
+
 def test_augmented_objective_restores_continuity_and_appends_mass() -> None:
     problem = _problem()
     transform = LogStateTransform(problem.shape)
