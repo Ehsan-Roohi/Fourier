@@ -27,9 +27,11 @@ from r26_gu_emerson_transformed_fv import (
     gu_emerson_equation63_terms,
 )
 from r26_gu_emerson_variables import (
+    GuEmersonLogStateTransform,
     gu_emerson_fields_from_state,
     state_from_gu_emerson_fields,
 )
+from r26_solver import physical_pseudo_transient_matrix
 
 
 def _smooth_asme_fields(nodes: int = 7):
@@ -210,6 +212,47 @@ def test_jfm_same_grid_backend_equals_historical_compatible_fv_operator() -> Non
     )
     assert np.array_equal(transformed[0], np.zeros_like(transformed[0]))
     assert np.array_equal(transformed[-1], np.zeros_like(transformed[-1]))
+
+
+def test_gu_emerson_pseudo_mass_uses_complete_nonlocal_chain_rule() -> None:
+    case, fields = _smooth_asme_fields(5)
+    state = state_from_gu_emerson_fields(
+        fields, x=case.x, y=case.y, mu=case.mu(fields.theta)
+    )
+    problem = R26NodeBVP(case, bulk_operator=compatible_fv_bulk_residual)
+    transform = GuEmersonLogStateTransform(case)
+    encoded = transform.encode(state)
+    matrix = physical_pseudo_transient_matrix(problem, transform, encoded)
+
+    assert matrix.shape == (problem.unknown_count, problem.unknown_count)
+    assert np.isfinite(matrix.data).all()
+    assert matrix.nnz > problem.unknown_count
+    mass_row = np.ravel_multi_index(
+        (problem.mass_j, problem.mass_i, 0), problem.shape
+    )
+    assert matrix.getrow(mass_row).nnz == 0
+
+    direction = np.linspace(-1.0, 1.0, problem.unknown_count)
+    direction /= np.linalg.norm(direction)
+    step = 2.0e-7
+    bulk_scale = np.asarray(case.scaling.bulk)
+
+    def mapped(vector: np.ndarray) -> np.ndarray:
+        physical = transform.decode(vector)
+        result = np.zeros(problem.shape)
+        result[1:-1, 1:-1] = physical[1:-1, 1:-1] / bulk_scale
+        result[problem.mass_j, problem.mass_i, 0] = 0.0
+        return result.ravel()
+
+    centered = (
+        mapped(encoded + step * direction) - mapped(encoded - step * direction)
+    ) / (2.0 * step)
+    np.testing.assert_allclose(
+        matrix @ direction,
+        centered,
+        rtol=3.0e-5,
+        atol=3.0e-7,
+    )
 
 
 def test_picard_stage_matches_nonlinear_residual_at_freeze_point() -> None:

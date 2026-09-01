@@ -12,7 +12,7 @@ import numpy as np
 from scipy.interpolate import RegularGridInterpolator
 from scipy.optimize import OptimizeResult, least_squares, root
 from scipy.optimize._numdiff import approx_derivative
-from scipy.sparse import coo_matrix, csr_matrix, diags
+from scipy.sparse import csc_matrix, coo_matrix, csr_matrix, diags
 from scipy.sparse.linalg import lsmr, splu
 
 from r26_cases import CavityCase
@@ -416,6 +416,91 @@ def pseudo_transient_diagonal(
     return diagonal.ravel()
 
 
+def physical_pseudo_transient_matrix(
+    problem: R26NodeBVP,
+    transform: R26StateTransform,
+    encoded_state: np.ndarray,
+) -> csc_matrix:
+    """Return the physical pseudo-mass chain rule in solver coordinates.
+
+    The ordinary logarithmic state transform is point-local, so its exact
+    pseudo-mass matrix is diagonal.  Gu--Emerson coordinates are different:
+    reconstructing ``sigma, q, m, R, Delta`` from ``g, h, omega, gamma, chi``
+    contains first and second spatial derivatives.  Consequently
+    ``d(physical state)/d(transformed state)`` is sparse but not diagonal.
+
+    This routine evaluates that chain rule by colored finite differences of
+    the coordinate map only.  No R26 residual is evaluated and no physical
+    equation is modified.  Boundary, corner, and bordered-mass rows remain
+    algebraic; only the 17 interior physical evolution rows receive the
+    pseudo-time mass matrix.  Letting the pseudo-time step grow removes this
+    matrix exactly and leaves the original steady root as the sole target.
+    """
+
+    if transform.shape != problem.shape:
+        raise ValueError("transform and problem shapes must match")
+    if not bool(getattr(transform, "supports_physical_pseudo_transient", False)):
+        raise ValueError(
+            "selected state transform does not define the physical pseudo-time chain rule"
+        )
+    encoded = np.asarray(encoded_state, dtype=float)
+    if encoded.shape != (problem.unknown_count,) or not np.isfinite(encoded).all():
+        raise ValueError("encoded pseudo-transient state has incorrect shape")
+
+    # Preserve the inexpensive exact diagonal used by the historical physical
+    # coordinates.  Alternative transforms use the complete sparse chain rule
+    # below rather than pretending their gradient reconstruction is local.
+    if isinstance(transform, LogStateTransform):
+        return diags(
+            pseudo_transient_diagonal(problem, transform, encoded),
+            format="csc",
+        )
+
+    radius = int(
+        getattr(transform, "physical_pseudo_transient_stencil_radius", 0)
+    )
+    if radius < 2:
+        raise ValueError(
+            "nonlocal state transform must declare a pseudo-transient stencil radius >= 2"
+        )
+    bulk_scale = np.asarray(problem.case.scaling.bulk, dtype=float)
+    if (
+        bulk_scale.shape != (NVAR,)
+        or not np.isfinite(bulk_scale).all()
+        or np.any(bulk_scale <= 0.0)
+    ):
+        raise ValueError("bulk residual scaling must contain 17 positive finite entries")
+
+    def scaled_physical_pseudo_state(vector: np.ndarray) -> np.ndarray:
+        state = transform.decode(vector)
+        values = np.zeros(problem.shape)
+        values[1:-1, 1:-1] = state[1:-1, 1:-1] / bulk_scale
+        values[problem.mass_j, problem.mass_i, 0] = 0.0
+        return values.ravel()
+
+    lower, upper = transform.least_squares_bounds()
+    pattern = jacobian_sparsity(
+        problem,
+        stencil_radius=radius,
+        include_mass_border=False,
+    )
+    base = scaled_physical_pseudo_state(encoded)
+    matrix = approx_derivative(
+        scaled_physical_pseudo_state,
+        encoded,
+        method="2-point",
+        abs_step=fv_absolute_difference_step(encoded),
+        bounds=(lower, upper),
+        sparsity=pattern,
+        f0=base,
+    ).tocsc()
+    if matrix.shape != (problem.unknown_count, problem.unknown_count):
+        raise RuntimeError("pseudo-transient chain-rule matrix has incorrect shape")
+    if not np.isfinite(matrix.data).all():
+        raise FloatingPointError("pseudo-transient chain-rule matrix is non-finite")
+    return matrix
+
+
 def secant_predict_state(
     problem: R26NodeBVP,
     previous_state: np.ndarray,
@@ -634,6 +719,14 @@ def solve_r26_bvp(
             for iteration in range(1, options.max_iterations + 1):
                 iterations = iteration
                 residual_linf = float(np.max(np.abs(residual), initial=0.0))
+                if options.display:
+                    print(
+                        "R26_NEWTON "
+                        f"iteration={iteration} residual_linf={residual_linf:.16e} "
+                        f"jacobians={jacobian_evaluations} evaluations={evaluations} "
+                        f"pseudo_time={pseudo_time_step:.16e}",
+                        flush=True,
+                    )
                 if residual_linf <= options.residual_tolerance:
                     success = True
                     message = (
@@ -699,6 +792,12 @@ def solve_r26_bvp(
                             **derivative_kwargs,
                         ).tocsc()
                     jacobian_evaluations += 1
+                    if options.display:
+                        print(
+                            "R26_JACOBIAN "
+                            f"count={jacobian_evaluations} evaluations={evaluations}",
+                            flush=True,
+                        )
                     newton_factorization = None
                     chord_steps = 0
                     force_jacobian_refresh = False
@@ -707,11 +806,11 @@ def solve_r26_bvp(
                 linear_matrix = jacobian
                 factorization = None
                 if use_pseudo_transient:
-                    pseudo_diagonal = pseudo_transient_diagonal(
+                    pseudo_matrix = physical_pseudo_transient_matrix(
                         problem, transform, encoded
                     )
                     linear_matrix = (
-                        jacobian + diags(pseudo_diagonal / pseudo_time_step, format="csc")
+                        jacobian + pseudo_matrix / pseudo_time_step
                     ).tocsc()
                     try:
                         factorization = splu(linear_matrix)
@@ -785,6 +884,17 @@ def solve_r26_bvp(
                                     options.pseudo_time_maximum,
                                 )
                             )
+                        if options.display:
+                            print(
+                                "R26_STEP accepted=true "
+                                f"alpha={alpha:.16e} "
+                                f"residual_linf={float(np.max(np.abs(residual), initial=0.0)):.16e} "
+                                f"linear_solver={linear_solver} "
+                                f"pseudo_transient={str(use_pseudo_transient).lower()} "
+                                f"pseudo_time={pseudo_time_step:.16e} "
+                                f"invalid_evaluations={objective.invalid_evaluations}",
+                                flush=True,
+                            )
                         if (
                             (not use_pseudo_transient and trial_merit > 0.25 * merit)
                             or (use_pseudo_transient and trial_merit > 0.95 * merit)
@@ -793,6 +903,15 @@ def solve_r26_bvp(
                         break
                     alpha *= 0.5
                 if not accepted_step:
+                    if options.display:
+                        print(
+                            "R26_STEP accepted=false "
+                            f"linear_solver={linear_solver} "
+                            f"pseudo_transient={str(use_pseudo_transient).lower()} "
+                            f"pseudo_time={pseudo_time_step:.16e} "
+                            f"invalid_evaluations={objective.invalid_evaluations}",
+                            flush=True,
+                        )
                     if use_pseudo_transient:
                         if pseudo_time_step > options.pseudo_time_minimum:
                             pseudo_time_step = max(
@@ -1016,6 +1135,7 @@ __all__ = [
     "interpolate_state_grid",
     "jacobian_sparsity",
     "load_restart",
+    "physical_pseudo_transient_matrix",
     "pseudo_transient_diagonal",
     "residual_family_row_scales",
     "save_restart",

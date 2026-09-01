@@ -340,13 +340,16 @@ class GuEmersonLogStateTransform:
     equations (48)--(55), so a physical R26 residual can be solved without
     treating those moments as the nonlinear unknowns.
 
-    The physical pseudo-time diagonal is deliberately disabled: gradients in
-    the reconstruction make its chain rule non-diagonal in these coordinates.
+    The physical pseudo-time chain rule is non-diagonal because the printed
+    reconstruction contains gradients.  The nonlinear solver therefore uses
+    a radius-two colored sparse matrix for that map instead of a false
+    diagonal approximation.
     """
 
     case: CavityCase
     maximum_log_magnitude: float = 50.0
-    supports_physical_pseudo_transient: bool = False
+    supports_physical_pseudo_transient: bool = True
+    physical_pseudo_transient_stencil_radius: int = 2
 
     def __post_init__(self) -> None:
         if self.maximum_log_magnitude <= 0.0:

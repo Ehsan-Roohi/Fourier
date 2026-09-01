@@ -55,7 +55,8 @@ def test_gu_emerson_log_newton_coordinates_round_trip_the_physical_state() -> No
     transform = GuEmersonLogStateTransform(case)
     rebuilt = transform.decode(transform.encode(state))
     assert np.allclose(rebuilt, state, rtol=2.0e-12, atol=6.0e-12)
-    assert transform.supports_physical_pseudo_transient is False
+    assert transform.supports_physical_pseudo_transient is True
+    assert transform.physical_pseudo_transient_stencil_radius == 2
 
 
 def test_stateless_solver_accepts_gu_emerson_coordinates_at_equilibrium() -> None:

@@ -56,7 +56,11 @@ CONSERVATION_TOLERANCE = 1.0e-7
 MAX_JACOBIANS = 8
 MAX_OBJECTIVE_EVALUATIONS = 16000
 MAX_NEWTON_ITERATIONS = 32
+RESCUE_MAX_JACOBIANS = 12
+RESCUE_MAX_OBJECTIVE_EVALUATIONS = 26000
+RESCUE_MAX_NEWTON_ITERATIONS = 48
 JACOBIAN_STENCIL_RADIUS = 4
+EXPECTED_FAILED_N32_SOURCE_COMMIT = "3cd50dc5a45f9bf086ac99dfc8e8762dc5b7d402"
 
 
 def require(condition: bool, message: str) -> None:
@@ -123,11 +127,77 @@ def load_authorized_n28(
     return state, x, y, record
 
 
+def load_failed_n32_candidate(
+    failed_dir: Path,
+    *,
+    case: object,
+) -> tuple[np.ndarray, dict[str, object]]:
+    """Load only the exact bounded N32 failure that motivated this rescue."""
+
+    record_path = failed_dir / "JFM_N32_TRANSFORMED_CANDIDATE_GATE.json"
+    archive_path = failed_dir / "gu_emerson_jfm_n32_candidate.npz"
+    require(record_path.is_file(), "failed N32 record is missing")
+    require(archive_path.is_file(), "failed N32 candidate archive is missing")
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    require(isinstance(record, dict), "failed N32 record is not an object")
+    require(
+        record.get("status")
+        == "R26_GU_EMERSON_JFM_N32_TRANSFORMED_CANDIDATE_FAILED",
+        "predecessor N32 status is not FAILED",
+    )
+    require(
+        record.get("source_commit") == EXPECTED_FAILED_N32_SOURCE_COMMIT,
+        "predecessor N32 source commit mismatch",
+    )
+    require(record.get("candidate_accepted") is False, "failed N32 was accepted")
+    require(record.get("n36_authorized") is False, "failed N32 authorized N36")
+    require(record.get("n40_authorized") is False, "failed N32 authorized N40")
+    require(record.get("maximum_grid_run") == 32, "failed run grid mismatch")
+    require(
+        record.get("higher_than_n32_run_attempted") is False,
+        "failed run attempted a grid above N32",
+    )
+    with np.load(archive_path, allow_pickle=False) as archive:
+        state = np.asarray(archive["state"], dtype=float)
+        x = np.asarray(archive["x"], dtype=float)
+        y = np.asarray(archive["y"], dtype=float)
+        require(not bool(np.asarray(archive["accepted"]).item()), "failed archive is accepted")
+        require(int(np.asarray(archive["nodes"]).item()) == 32, "failed archive node mismatch")
+        require(
+            str(np.asarray(archive["source_commit"]).item())
+            == EXPECTED_FAILED_N32_SOURCE_COMMIT,
+            "failed archive source mismatch",
+        )
+        require(
+            not bool(np.asarray(archive["n36_authorized"]).item()),
+            "failed archive authorizes N36",
+        )
+        require(
+            not bool(np.asarray(archive["n40_authorized"]).item()),
+            "failed archive authorizes N40",
+        )
+    require(state.shape == (32, 32, 17), "failed N32 state shape mismatch")
+    require(
+        np.array_equal(x, case.x) and np.array_equal(y, case.y),
+        "failed N32 grid mismatch",
+    )
+    require(
+        state_sha256(state) == record.get("candidate", {}).get("state_sha256"),
+        "failed N32 candidate hash mismatch",
+    )
+    return state, record
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--n28-gate-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument(
+        "--failed-n32-dir",
+        type=Path,
+        help="resume only from the exact source-locked failed N32 candidate",
+    )
     args = parser.parse_args()
     if re.fullmatch(r"[0-9a-f]{40}", args.source_commit) is None:
         parser.error("source commit must be an immutable lowercase 40-character SHA")
@@ -161,16 +231,25 @@ def main() -> None:
             bulk_operator=compatible_fv_bulk_residual,
             mass_weights=wall_bounded_control_volume_weights(case.x, case.y),
         )
-        seed = interpolate_state_grid(
-            reference,
-            32,
-            target_mean_density=case.mean_density,
-            mass_weights=problem.mass_weights,
-            old_x=old_x,
-            old_y=old_y,
-            new_x=case.x,
-            new_y=case.y,
-        )
+        predecessor_failure = None
+        if args.failed_n32_dir is None:
+            seed = interpolate_state_grid(
+                reference,
+                32,
+                target_mean_density=case.mean_density,
+                mass_weights=problem.mass_weights,
+                old_x=old_x,
+                old_y=old_y,
+                new_x=case.x,
+                new_y=case.y,
+            )
+            seed_kind = "accepted_transformed_N28_interpolated_to_N32"
+        else:
+            seed, predecessor_failure = load_failed_n32_candidate(
+                args.failed_n32_dir,
+                case=case,
+            )
+            seed_kind = "source_locked_failed_N32_candidate_for_physical_PTC_rescue"
         transform = GuEmersonLogStateTransform(case)
         seed_roundtrip = transform.decode(transform.encode(seed))
         seed_roundtrip_linf = float(
@@ -178,15 +257,41 @@ def main() -> None:
         )
         seed_evaluation = problem.evaluate(seed)
         seed_raw = raw_gate(seed_evaluation.diagnostics)
+        if predecessor_failure is not None:
+            require(
+                math.isclose(
+                    seed_raw,
+                    float(predecessor_failure["candidate"]["raw_gate"]),
+                    rel_tol=0.0,
+                    abs_tol=5.0e-12,
+                ),
+                "failed N32 seed raw gate does not replay",
+            )
+        rescue = predecessor_failure is not None
         options = SolveOptions(
             method="colored_newton",
             residual_tolerance=1.0e-9,
             held_out_continuity_tolerance=RAW_TOLERANCE,
-            max_iterations=MAX_NEWTON_ITERATIONS,
-            max_objective_evaluations=MAX_OBJECTIVE_EVALUATIONS,
+            max_iterations=(
+                RESCUE_MAX_NEWTON_ITERATIONS if rescue else MAX_NEWTON_ITERATIONS
+            ),
+            max_objective_evaluations=(
+                RESCUE_MAX_OBJECTIVE_EVALUATIONS
+                if rescue
+                else MAX_OBJECTIVE_EVALUATIONS
+            ),
             analytic_mass_jacobian=True,
-            pseudo_transient=False,
-            max_jacobian_evaluations=MAX_JACOBIANS,
+            pseudo_transient=rescue,
+            pseudo_time_initial=1.0e-2,
+            pseudo_time_minimum=1.0e-8,
+            pseudo_time_maximum=1.0e8,
+            pseudo_time_ser_exponent=1.0,
+            pseudo_time_growth_limit=2.0,
+            newton_switch_tolerance=1.0e-6,
+            display=rescue,
+            max_jacobian_evaluations=(
+                RESCUE_MAX_JACOBIANS if rescue else MAX_JACOBIANS
+            ),
             jacobian_stencil_radius=JACOBIAN_STENCIL_RADIUS,
         )
         result = solve_r26_bvp(
@@ -289,12 +394,27 @@ def main() -> None:
                 "n32_authorized": n28_record["n32_authorized"],
             },
             "seed": {
-                "kind": "accepted_transformed_N28_interpolated_to_N32",
+                "kind": seed_kind,
                 "state_sha256": state_sha256(seed),
                 "raw_gate": seed_raw,
                 "diagnostics": asdict(seed_evaluation.diagnostics),
                 "transformed_coordinate_roundtrip_linf": seed_roundtrip_linf,
             },
+            "predecessor_failure": (
+                None
+                if predecessor_failure is None
+                else {
+                    "source_commit": predecessor_failure["source_commit"],
+                    "status": predecessor_failure["status"],
+                    "candidate_state_sha256": predecessor_failure["candidate"][
+                        "state_sha256"
+                    ],
+                    "candidate_raw_gate": predecessor_failure["candidate"][
+                        "raw_gate"
+                    ],
+                    "solver_message": predecessor_failure["solver"]["message"],
+                }
+            ),
             "candidate": {
                 "state_sha256": state_sha256(candidate),
                 "raw_gate": candidate_raw,
