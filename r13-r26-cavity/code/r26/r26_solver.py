@@ -107,12 +107,20 @@ class SolveOptions:
     pseudo_time_target_accepted_alpha: float = 0.0
     newton_switch_tolerance: float = 1.0e-6
     require_raw_linf_decrease: bool = False
+    direction_strategy: str = "newton"
+    trust_region_initial_newton_fraction: float = 0.25
+    trust_region_minimum_radius: float = 1.0e-10
+    trust_region_maximum_radius: float = 1.0e10
     max_jacobian_evaluations: int | None = None
     jacobian_stencil_radius: int = 2
 
     def __post_init__(self) -> None:
         if self.method not in {"krylov", "least_squares", "colored_newton"}:
             raise ValueError("method must be krylov, least_squares, or colored_newton")
+        if self.direction_strategy not in {"newton", "raw_dogleg"}:
+            raise ValueError("direction_strategy must be newton or raw_dogleg")
+        if self.direction_strategy != "newton" and self.method != "colored_newton":
+            raise ValueError("alternative direction strategies require colored_newton")
         if self.residual_tolerance <= 0.0 or self.held_out_continuity_tolerance <= 0.0:
             raise ValueError("solver tolerances must be positive")
         if self.max_iterations < 1 or self.max_function_evaluations < 1:
@@ -155,8 +163,25 @@ class SolveOptions:
             raise ValueError(
                 "target accepted pseudo-time alpha cannot be below the alpha floor"
             )
-        if self.require_raw_linf_decrease and not self.pseudo_transient:
-            raise ValueError("raw-Linf line-search protection requires pseudo-transient mode")
+        trust_values = (
+            self.trust_region_initial_newton_fraction,
+            self.trust_region_minimum_radius,
+            self.trust_region_maximum_radius,
+        )
+        if not all(np.isfinite(value) and value > 0.0 for value in trust_values):
+            raise ValueError("trust-region controls must be finite and positive")
+        if self.trust_region_initial_newton_fraction > 1.0:
+            raise ValueError("initial trust radius cannot exceed the Newton-step norm")
+        if self.trust_region_minimum_radius > self.trust_region_maximum_radius:
+            raise ValueError("minimum trust radius cannot exceed maximum trust radius")
+        if (
+            self.require_raw_linf_decrease
+            and not self.pseudo_transient
+            and self.direction_strategy != "raw_dogleg"
+        ):
+            raise ValueError(
+                "raw-Linf protection requires pseudo-transient or raw-dogleg mode"
+            )
         if self.max_jacobian_evaluations is not None and self.max_jacobian_evaluations < 1:
             raise ValueError("Jacobian evaluation limit must be positive when supplied")
         if self.jacobian_stencil_radius < 2:
@@ -196,6 +221,8 @@ class EncodedR26Objective:
         self.invalid_evaluations = 0
         self.last_invalid_error: str | None = None
         self.last_raw_linf = float("inf")
+        self.last_raw_merit = float("inf")
+        self.last_raw_residual: np.ndarray | None = None
 
     def __call__(self, vector: np.ndarray) -> np.ndarray:
         try:
@@ -208,11 +235,17 @@ class EncodedR26Objective:
                     abs(evaluation.diagnostics.mass_error),
                 )
             )
+            self.last_raw_residual = evaluation.unscaled_residual.ravel().copy()
+            self.last_raw_merit = 0.5 * float(
+                np.dot(self.last_raw_residual, self.last_raw_residual)
+            )
             return evaluation.flat
         except (FloatingPointError, ValueError, OverflowError) as exc:
             self.invalid_evaluations += 1
             self.last_invalid_error = f"{type(exc).__name__}: {exc}"
             self.last_raw_linf = float("inf")
+            self.last_raw_merit = float("inf")
+            self.last_raw_residual = None
             x = np.asarray(vector, dtype=float)
             sign = np.where(np.isfinite(x) & (x < 0.0), -1.0, 1.0)
             magnitude = 1.0 + np.minimum(np.nan_to_num(np.abs(x), nan=100.0, posinf=100.0), 100.0)
@@ -231,6 +264,122 @@ class EncodedR26Objective:
         step = relative_step * (1.0 + np.linalg.norm(x)) / norm_v
         return (self(x + step * v) - self(x - step * v)) / (2.0 * step)
 
+
+def raw_residual_row_factors(problem: R26NodeBVP) -> np.ndarray:
+    """Return the exact factors mapping scaled square rows back to raw rows."""
+
+    factors = np.ones(problem.shape, dtype=float)
+    factors[1:-1, 1:-1] = np.asarray(problem.case.scaling.bulk, dtype=float)
+    for node in problem.boundary_nodes:
+        factors[node.j, node.i, :11] = np.asarray(
+            problem.case.scaling.wall, dtype=float
+        )
+        factors[node.j, node.i, 11:] = np.asarray(
+            problem.case.scaling.extrapolation, dtype=float
+        )
+    for j, i in ((0, 0), (0, -1), (-1, 0), (-1, -1)):
+        factors[j, i] = np.asarray(problem.case.scaling.corner, dtype=float)
+    factors[problem.mass_j, problem.mass_i, 0] = float(problem.case.scaling.mass)
+    flat = factors.ravel()
+    if flat.shape != (problem.unknown_count,) or not np.all(
+        np.isfinite(flat) & (flat > 0.0)
+    ):
+        raise ValueError("raw residual row factors must be positive and finite")
+    return flat
+
+
+def raw_dogleg_direction(
+    jacobian: csc_matrix,
+    residual: np.ndarray,
+    newton_direction: np.ndarray,
+    row_factors: np.ndarray,
+    radius: float | None,
+    *,
+    initial_newton_fraction: float = 0.25,
+    minimum_radius: float = 1.0e-10,
+    maximum_radius: float = 1.0e10,
+) -> tuple[np.ndarray, float, float, float]:
+    """Build a column-equilibrated dogleg step in the raw residual metric."""
+
+    matrix = jacobian.tocsc()
+    values = np.asarray(residual, dtype=float)
+    newton = np.asarray(newton_direction, dtype=float)
+    factors = np.asarray(row_factors, dtype=float)
+    expected = (values.size, values.size)
+    if (
+        matrix.shape != expected
+        or newton.shape != values.shape
+        or factors.shape != values.shape
+    ):
+        raise ValueError("dogleg inputs have incompatible shapes")
+    if not (
+        np.isfinite(values).all()
+        and np.isfinite(newton).all()
+        and np.isfinite(factors).all()
+        and np.all(factors > 0.0)
+    ):
+        raise ValueError("dogleg inputs must be finite")
+    controls = (initial_newton_fraction, minimum_radius, maximum_radius)
+    if not all(np.isfinite(value) and value > 0.0 for value in controls):
+        raise ValueError("dogleg radius controls must be finite and positive")
+    if radius is not None and (not np.isfinite(radius) or radius <= 0.0):
+        raise ValueError("dogleg radius must be positive when supplied")
+
+    raw_matrix = matrix.multiply(factors[:, None]).tocsc()
+    raw_residual = factors * values
+    column_norm = np.sqrt(
+        np.asarray(raw_matrix.power(2).sum(axis=0), dtype=float).ravel()
+    )
+    norm_floor = max(
+        np.finfo(float).tiny,
+        1.0e-12 * float(np.max(column_norm, initial=0.0)),
+    )
+    column_norm = np.maximum(column_norm, norm_floor)
+    inverse_column_norm = 1.0 / column_norm
+
+    # A = J_raw D and dx = D z.  The trust radius therefore has no hidden
+    # dependence on the disparate transformed-variable units.
+    gradient = inverse_column_norm * np.asarray(
+        raw_matrix.T @ raw_residual, dtype=float
+    ).ravel()
+    gradient_norm_squared = float(np.dot(gradient, gradient))
+    newton_scaled = column_norm * newton
+    newton_norm = float(np.linalg.norm(newton_scaled))
+    if radius is None:
+        radius = float(
+            np.clip(
+                initial_newton_fraction * newton_norm,
+                minimum_radius,
+                maximum_radius,
+            )
+        )
+    if gradient_norm_squared == 0.0:
+        return newton.copy(), 0.0, newton_norm, radius
+    ag = np.asarray(
+        raw_matrix @ (inverse_column_norm * gradient), dtype=float
+    ).ravel()
+    ag_norm_squared = float(np.dot(ag, ag))
+    if not np.isfinite(ag_norm_squared) or ag_norm_squared <= 0.0:
+        raise FloatingPointError("raw dogleg Cauchy curvature is not positive")
+    cauchy = -(gradient_norm_squared / ag_norm_squared) * gradient
+    cauchy_norm = float(np.linalg.norm(cauchy))
+
+    if newton_norm <= radius:
+        selected = newton_scaled
+    elif cauchy_norm >= radius:
+        selected = (radius / cauchy_norm) * cauchy
+    else:
+        difference = newton_scaled - cauchy
+        a = float(np.dot(difference, difference))
+        b = 2.0 * float(np.dot(cauchy, difference))
+        c = float(np.dot(cauchy, cauchy)) - radius * radius
+        discriminant = max(0.0, b * b - 4.0 * a * c)
+        tau = (-b + np.sqrt(discriminant)) / (2.0 * a)
+        selected = cauchy + float(np.clip(tau, 0.0, 1.0)) * difference
+    direction = inverse_column_norm * selected
+    if not np.isfinite(direction).all():
+        raise FloatingPointError("raw dogleg direction is non-finite")
+    return direction, cauchy_norm, newton_norm, radius
 
 class EncodedR26MassContinuityObjective:
     """Return all physical BVP rows plus the independent mass constraint.
@@ -750,6 +899,12 @@ def solve_r26_bvp(
         chord_steps = 0
         force_jacobian_refresh = False
         pseudo_time_step = float(options.pseudo_time_initial)
+        raw_row_factors = (
+            raw_residual_row_factors(problem)
+            if options.direction_strategy == "raw_dogleg"
+            else None
+        )
+        trust_region_radius: float | None = None
         try:
             for iteration in range(1, options.max_iterations + 1):
                 iterations = iteration
@@ -775,7 +930,12 @@ def solve_r26_bvp(
                     options.pseudo_transient
                     and residual_linf > options.newton_switch_tolerance
                 )
-                chord_limit = 12 if use_pseudo_transient else 3
+                chord_limit = (
+                    12
+                    if use_pseudo_transient
+                    or options.direction_strategy == "raw_dogleg"
+                    else 3
+                )
                 if (
                     jacobian is None
                     or force_jacobian_refresh
@@ -879,7 +1039,27 @@ def solve_r26_bvp(
                 if not np.isfinite(direction).all():
                     message = f"{linear_solver} produced a non-finite Newton direction"
                     break
-                merit = 0.5 * float(np.dot(residual, residual))
+                if options.direction_strategy == "raw_dogleg":
+                    assert raw_row_factors is not None
+                    direction, cauchy_norm, newton_norm, trust_region_radius = (
+                        raw_dogleg_direction(
+                            jacobian,
+                            residual,
+                            direction,
+                            raw_row_factors,
+                            trust_region_radius,
+                            initial_newton_fraction=(
+                                options.trust_region_initial_newton_fraction
+                            ),
+                            minimum_radius=options.trust_region_minimum_radius,
+                            maximum_radius=options.trust_region_maximum_radius,
+                        )
+                    )
+                    linear_solver = "raw-dogleg/" + linear_solver
+                    merit = float(objective.last_raw_merit)
+                else:
+                    cauchy_norm = newton_norm = 0.0
+                    merit = 0.5 * float(np.dot(residual, residual))
                 old_residual_linf = residual_linf
                 alpha = 1.0
                 accepted_step = False
@@ -888,7 +1068,11 @@ def solve_r26_bvp(
                     trial = np.clip(encoded + alpha * direction, lower, upper)
                     trial_residual = counted(trial)
                     trial_raw_linf = objective.last_raw_linf
-                    trial_merit = 0.5 * float(np.dot(trial_residual, trial_residual))
+                    trial_merit = (
+                        float(objective.last_raw_merit)
+                        if options.direction_strategy == "raw_dogleg"
+                        else 0.5 * float(np.dot(trial_residual, trial_residual))
+                    )
                     sufficient_decrease = (
                         trial_merit < merit
                         if use_pseudo_transient
@@ -960,7 +1144,26 @@ def solve_r26_bvp(
                                     options.pseudo_time_maximum,
                                 )
                             )
+                        elif options.direction_strategy == "raw_dogleg":
+                            assert trust_region_radius is not None
+                            if alpha >= 0.999:
+                                trust_region_radius = min(
+                                    options.trust_region_maximum_radius,
+                                    2.0 * trust_region_radius,
+                                )
+                            elif alpha < 0.5:
+                                trust_region_radius = max(
+                                    options.trust_region_minimum_radius,
+                                    alpha * trust_region_radius,
+                                )
                         if options.display:
+                            trust_report = (
+                                f"trust_radius={trust_region_radius:.16e} "
+                                f"cauchy_norm={cauchy_norm:.16e} "
+                                f"newton_norm={newton_norm:.16e} "
+                                if options.direction_strategy == "raw_dogleg"
+                                else ""
+                            )
                             print(
                                 "R26_STEP accepted=true "
                                 f"alpha={alpha:.16e} "
@@ -969,11 +1172,16 @@ def solve_r26_bvp(
                                 f"linear_solver={linear_solver} "
                                 f"pseudo_transient={str(use_pseudo_transient).lower()} "
                                 f"pseudo_time={pseudo_time_step:.16e} "
+                                f"{trust_report}"
                                 f"invalid_evaluations={objective.invalid_evaluations}",
                                 flush=True,
                             )
                         if (
-                            (not use_pseudo_transient and trial_merit > 0.25 * merit)
+                            (
+                                not use_pseudo_transient
+                                and options.direction_strategy != "raw_dogleg"
+                                and trial_merit > 0.25 * merit
+                            )
                             or (
                                 use_pseudo_transient
                                 and alpha >= 0.5
@@ -1056,6 +1264,23 @@ def solve_r26_bvp(
                         message = (
                             "SER pseudo-transient line search failed at minimum "
                             f"pseudo-time step after {linear_solver}"
+                        )
+                        break
+                    if options.direction_strategy == "raw_dogleg":
+                        assert trust_region_radius is not None
+                        if trust_region_radius > options.trust_region_minimum_radius:
+                            trust_region_radius = max(
+                                options.trust_region_minimum_radius,
+                                0.25 * trust_region_radius,
+                            )
+                            if chord_steps > 0:
+                                force_jacobian_refresh = True
+                                newton_factorization = None
+                                chord_steps = 0
+                            continue
+                        message = (
+                            "raw dogleg trust region reached its minimum radius "
+                            f"after {linear_solver}"
                         )
                         break
                     if chord_steps > 0:
@@ -1271,6 +1496,8 @@ __all__ = [
     "load_restart",
     "physical_pseudo_transient_matrix",
     "pseudo_transient_diagonal",
+    "raw_dogleg_direction",
+    "raw_residual_row_factors",
     "residual_family_row_scales",
     "save_restart",
     "secant_predict_state",

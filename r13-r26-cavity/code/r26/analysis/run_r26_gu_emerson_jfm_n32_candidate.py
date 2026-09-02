@@ -56,12 +56,12 @@ CONSERVATION_TOLERANCE = 1.0e-7
 MAX_JACOBIANS = 8
 MAX_OBJECTIVE_EVALUATIONS = 16000
 MAX_NEWTON_ITERATIONS = 32
-RESCUE_MAX_JACOBIANS = 16
-RESCUE_MAX_OBJECTIVE_EVALUATIONS = 36000
-RESCUE_MAX_NEWTON_ITERATIONS = 64
+RESCUE_MAX_JACOBIANS = 12
+RESCUE_MAX_OBJECTIVE_EVALUATIONS = 28000
+RESCUE_MAX_NEWTON_ITERATIONS = 120
 JACOBIAN_STENCIL_RADIUS = 4
-EXPECTED_FAILED_N32_SOURCE_COMMIT = "292017c2262fb3fe03a3c6a51af6cbbeb7a10552"
-EXPECTED_FAILED_N32_RAW_GATE = 2.4607600940988905
+EXPECTED_FAILED_N32_SOURCE_COMMIT = "0f68c661d7fdd4902bf27e947b212b5acc28bcaa"
+EXPECTED_FAILED_N32_RAW_GATE = 2.443562791321841
 
 
 def require(condition: bool, message: str) -> None:
@@ -169,11 +169,14 @@ def load_failed_n32_candidate(
     )
     require(
         record.get("solver", {}).get("message")
-        == "colored sparse Newton Jacobian-evaluation limit reached (12)",
+        == (
+            "SER pseudo-transient step remained below the alpha floor at maximum "
+            "pseudo-time after splu-ptc"
+        ),
         "predecessor N32 solver stop mismatch",
     )
     require(
-        record.get("solver", {}).get("jacobian_evaluations") == 12,
+        record.get("solver", {}).get("jacobian_evaluations") == 16,
         "predecessor N32 Jacobian count mismatch",
     )
     with np.load(archive_path, allow_pickle=False) as archive:
@@ -269,7 +272,7 @@ def main() -> None:
                 case=case,
             )
             seed_kind = (
-                "source_locked_failed_N32_candidate_for_raw_guarded_physical_PTC_rescue"
+                "source_locked_failed_N32_candidate_for_raw_dogleg_trust_region"
             )
         transform = GuEmersonLogStateTransform(case)
         seed_roundtrip = transform.decode(transform.encode(seed))
@@ -302,17 +305,21 @@ def main() -> None:
                 else MAX_OBJECTIVE_EVALUATIONS
             ),
             analytic_mass_jacobian=True,
-            pseudo_transient=rescue,
+            pseudo_transient=False,
             pseudo_time_initial=1.0e-2,
             pseudo_time_minimum=1.0e-8,
             pseudo_time_maximum=1.0e8,
             pseudo_time_ser_exponent=1.0,
             pseudo_time_growth_limit=2.0,
-            pseudo_time_minimum_accepted_alpha=(2.0**-10 if rescue else 0.0),
+            pseudo_time_minimum_accepted_alpha=0.0,
             pseudo_time_small_alpha_growth=4.0,
-            pseudo_time_target_accepted_alpha=(0.25 if rescue else 0.0),
+            pseudo_time_target_accepted_alpha=0.0,
             newton_switch_tolerance=1.0e-6,
             require_raw_linf_decrease=rescue,
+            direction_strategy=("raw_dogleg" if rescue else "newton"),
+            trust_region_initial_newton_fraction=(2.0**-8 if rescue else 0.25),
+            trust_region_minimum_radius=1.0e-10,
+            trust_region_maximum_radius=1.0e10,
             display=rescue,
             max_jacobian_evaluations=(
                 RESCUE_MAX_JACOBIANS if rescue else MAX_JACOBIANS

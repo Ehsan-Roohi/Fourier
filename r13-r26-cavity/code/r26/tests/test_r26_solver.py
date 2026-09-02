@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.sparse import csc_matrix
 from unittest.mock import patch
 
 from r26_cases import (
@@ -20,6 +21,8 @@ from r26_solver import (
     interpolate_state_grid,
     jacobian_sparsity,
     pseudo_transient_diagonal,
+    raw_dogleg_direction,
+    raw_residual_row_factors,
     residual_family_row_scales,
     SolveOptions,
     secant_predict_state,
@@ -453,6 +456,39 @@ def test_raw_augmented_objective_uses_unscaled_rows_and_raw_mass() -> None:
             delta_index
         ],
     )
+
+
+def test_raw_row_factors_exactly_recover_the_unscaled_square_residual() -> None:
+    problem = _problem()
+    state = problem.case.equilibrium_state()
+    state[2, 1, 16] = 0.2
+    state[..., 0] = 1.1
+    evaluation = problem.evaluate(state)
+    assert np.allclose(
+        raw_residual_row_factors(problem) * evaluation.flat,
+        evaluation.unscaled_residual.ravel(),
+        rtol=0.0,
+        atol=2.0e-16,
+    )
+
+
+def test_raw_dogleg_changes_direction_at_a_bounded_equilibrated_radius() -> None:
+    jacobian = csc_matrix(np.asarray(((1.0, 1.0), (0.0, 1.0))))
+    residual = np.asarray((1.0, 2.0))
+    newton = np.asarray((1.0, -2.0))
+    direction, cauchy_norm, newton_norm, radius = raw_dogleg_direction(
+        jacobian,
+        residual,
+        newton,
+        np.ones(2),
+        0.1,
+    )
+    column_norm = np.asarray((1.0, np.sqrt(2.0)))
+    assert np.isclose(np.linalg.norm(column_norm * direction), 0.1)
+    assert float(np.dot(jacobian.T @ residual, direction)) < 0.0
+    assert not np.allclose(direction / direction[0], newton / newton[0])
+    assert cauchy_norm > 0.0
+    assert newton_norm > radius
 
 
 def test_residual_has_no_hidden_history() -> None:

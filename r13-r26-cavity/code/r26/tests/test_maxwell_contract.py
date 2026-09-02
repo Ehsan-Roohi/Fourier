@@ -23,11 +23,11 @@ GATE_VALIDATOR = R26_ROOT / "tools" / "validate_r26_globalization_gate.py"
 JFM_N32_DRIVER = (
     R26_ROOT / "analysis" / "run_r26_gu_emerson_jfm_n32_candidate.py"
 )
-JFM_N32_PTC_SLURM = (
-    R26_ROOT / "hpc" / "r26_gu_emerson_jfm_n32_ptc_rescue.slurm"
+JFM_N32_DOGLEG_SLURM = (
+    R26_ROOT / "hpc" / "r26_gu_emerson_jfm_n32_raw_dogleg.slurm"
 )
-JFM_N32_PTC_SUBMIT = (
-    R26_ROOT / "hpc" / "submit_r26_gu_emerson_jfm_n32_ptc_rescue.sh"
+JFM_N32_DOGLEG_SUBMIT = (
+    R26_ROOT / "hpc" / "submit_r26_gu_emerson_jfm_n32_raw_dogleg.sh"
 )
 N8_N16_GATE_SLURM = R26_ROOT / "hpc" / "r26_kn020_ser_ptc_gate_n8_n16.slurm"
 N30_PRODUCTION_SLURM = R26_ROOT / "hpc" / "r26_kn020_ser_ptc_fresh_n30.slurm"
@@ -592,29 +592,28 @@ class MaxwellContract(unittest.TestCase):
             with self.subTest(termination=termination):
                 self.assertNotEqual(module.termination_exit_code(termination), 0)
 
-    def test_jfm_n32_ptc_rescue_is_source_locked_bounded_and_fail_closed(self) -> None:
+    def test_jfm_n32_raw_dogleg_is_source_locked_bounded_and_fail_closed(self) -> None:
         driver = JFM_N32_DRIVER.read_text(encoding="utf-8")
-        slurm = JFM_N32_PTC_SLURM.read_text(encoding="utf-8")
-        submit = JFM_N32_PTC_SUBMIT.read_text(encoding="utf-8")
+        slurm = JFM_N32_DOGLEG_SLURM.read_text(encoding="utf-8")
+        submit = JFM_N32_DOGLEG_SUBMIT.read_text(encoding="utf-8")
         self.assertIn(
-            'EXPECTED_FAILED_N32_SOURCE_COMMIT = "292017c2262fb3fe03a3c6a51af6cbbeb7a10552"',
+            'EXPECTED_FAILED_N32_SOURCE_COMMIT = "0f68c661d7fdd4902bf27e947b212b5acc28bcaa"',
             driver,
         )
         self.assertIn("--failed-n32-dir", driver)
-        self.assertIn("pseudo_transient=rescue", driver)
+        self.assertIn('direction_strategy=("raw_dogleg" if rescue else "newton")', driver)
+        self.assertIn("pseudo_transient=False", driver)
         self.assertIn("require_raw_linf_decrease=rescue", driver)
-        self.assertIn("pseudo_time_minimum_accepted_alpha=(2.0**-10 if rescue else 0.0)", driver)
-        self.assertIn("pseudo_time_small_alpha_growth=4.0", driver)
-        self.assertIn("pseudo_time_target_accepted_alpha=(0.25 if rescue else 0.0)", driver)
-        self.assertIn("RESCUE_MAX_JACOBIANS = 16", driver)
-        self.assertIn("292017c2262fb3fe03a3c6a51af6cbbeb7a10552", driver)
-        self.assertIn("physical_pseudo_transient_matrix", (
-            R26_ROOT / "r26_solver.py"
-        ).read_text(encoding="utf-8"))
+        self.assertIn("trust_region_initial_newton_fraction=(2.0**-8 if rescue else 0.25)", driver)
+        self.assertIn("RESCUE_MAX_JACOBIANS = 12", driver)
+        self.assertIn("0f68c661d7fdd4902bf27e947b212b5acc28bcaa", driver)
+        solver = (R26_ROOT / "r26_solver.py").read_text(encoding="utf-8")
+        self.assertIn("raw_dogleg_direction", solver)
+        self.assertIn("raw_residual_row_factors", solver)
         self.assertIn("#SBATCH --mem=32G", slurm)
         self.assertIn("#SBATCH --time=08:00:00", slurm)
         self.assertIn("maximum_grid_run", slurm)
-        self.assertIn("ALPHA_AWARE_PTC", slurm)
+        self.assertIn("RAW_DOGLEG", slurm)
         self.assertIn("n36_authorized", slurm)
         self.assertIn("n40_authorized", slurm)
         self.assertNotIn("N36/", slurm)
@@ -622,8 +621,8 @@ class MaxwellContract(unittest.TestCase):
         self.assertIn("package_on_exit", slurm)
         self.assertIn("_RESULTS.zip", slurm)
         self.assertIn("R26_GE_JFM_N32_FAILED_DIR", submit)
-        self.assertIn("R26_GE_JFM_N32_PTC_REF", submit)
-        self.assertIn("R26_GU_EMERSON_JFM_N32_ALPHA_AWARE_PTC_", submit)
+        self.assertIn("R26_GE_JFM_N32_DOGLEG_REF", submit)
+        self.assertIn("R26_GU_EMERSON_JFM_N32_RAW_DOGLEG_", submit)
 
     def test_validator_requires_declared_grid_beta(self) -> None:
         environment = dict(__import__("os").environ)
