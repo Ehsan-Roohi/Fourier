@@ -219,6 +219,12 @@ def test_raw_guard_options_are_fail_closed() -> None:
         {"pseudo_time_minimum_accepted_alpha": -0.1},
         {"pseudo_time_minimum_accepted_alpha": 1.1},
         {"pseudo_time_small_alpha_growth": 1.0},
+        {"pseudo_time_target_accepted_alpha": -0.1},
+        {"pseudo_time_target_accepted_alpha": 1.1},
+        {
+            "pseudo_time_minimum_accepted_alpha": 0.25,
+            "pseudo_time_target_accepted_alpha": 0.125,
+        },
         {"require_raw_linf_decrease": True},
     )
     for values in invalid_options:
@@ -328,6 +334,69 @@ def test_failed_ptc_chord_refreshes_jacobian_before_changing_pseudo_time() -> No
     assert result.pseudo_transient_steps == 2
     assert np.isclose(result.encoded_state[delta_index], 0.05, atol=1.0e-8)
     assert result.final_pseudo_time_step == 1.0e8
+
+
+def test_accepted_damped_step_grows_ptc_and_reuses_the_jacobian() -> None:
+    import r26_solver as solver_module
+
+    problem = _problem(nodes=5)
+    state = problem.case.equilibrium_state()
+    state[2, 2, 16] = 0.1
+    delta_index = int(np.ravel_multi_index((2, 2, 16), problem.shape))
+
+    class DampedRawObjective:
+        def __init__(self, problem: object, transform: object, penalty: float) -> None:
+            del problem, transform, penalty
+            self.invalid_evaluations = 0
+            self.last_invalid_error = None
+            self.last_raw_linf = float("inf")
+
+        def __call__(self, vector: np.ndarray) -> np.ndarray:
+            value = float(vector[delta_index])
+            residual = np.zeros_like(vector)
+            residual[delta_index] = value
+            # Keep the scaled merit almost unchanged, as at N32, while the
+            # independent raw gate follows the component being corrected.
+            residual[delta_index + 1] = 1.0
+            self.last_raw_linf = abs(value)
+            return residual
+
+    original_derivative = solver_module.approx_derivative
+
+    def overlong_direction_derivative(*args: object, **kwargs: object) -> object:
+        return 0.1 * original_derivative(*args, **kwargs)
+
+    with (
+        patch.object(solver_module, "EncodedR26Objective", DampedRawObjective),
+        patch.object(
+            solver_module,
+            "approx_derivative",
+            overlong_direction_derivative,
+        ),
+    ):
+        result = solve_r26_bvp(
+            problem,
+            state,
+            options=SolveOptions(
+                method="colored_newton",
+                residual_tolerance=1.0e-12,
+                held_out_continuity_tolerance=1.0e-12,
+                max_iterations=2,
+                pseudo_transient=True,
+                pseudo_time_initial=1.0e8,
+                pseudo_time_maximum=1.0e10,
+                pseudo_time_minimum_accepted_alpha=2.0**-10,
+                pseudo_time_small_alpha_growth=4.0,
+                pseudo_time_target_accepted_alpha=0.25,
+                require_raw_linf_decrease=True,
+                max_jacobian_evaluations=1,
+            ),
+        )
+
+    assert result.jacobian_evaluations == 1
+    assert result.pseudo_transient_steps == 2
+    assert result.final_pseudo_time_step >= 4.0e8
+    assert result.message == "colored sparse Newton iteration limit reached"
 
 
 def test_augmented_objective_restores_continuity_and_appends_mass() -> None:

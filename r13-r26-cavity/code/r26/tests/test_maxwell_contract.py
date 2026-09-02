@@ -597,7 +597,7 @@ class MaxwellContract(unittest.TestCase):
         slurm = JFM_N32_PTC_SLURM.read_text(encoding="utf-8")
         submit = JFM_N32_PTC_SUBMIT.read_text(encoding="utf-8")
         self.assertIn(
-            'EXPECTED_FAILED_N32_SOURCE_COMMIT = "3cd50dc5a45f9bf086ac99dfc8e8762dc5b7d402"',
+            'EXPECTED_FAILED_N32_SOURCE_COMMIT = "292017c2262fb3fe03a3c6a51af6cbbeb7a10552"',
             driver,
         )
         self.assertIn("--failed-n32-dir", driver)
@@ -605,13 +605,16 @@ class MaxwellContract(unittest.TestCase):
         self.assertIn("require_raw_linf_decrease=rescue", driver)
         self.assertIn("pseudo_time_minimum_accepted_alpha=(2.0**-10 if rescue else 0.0)", driver)
         self.assertIn("pseudo_time_small_alpha_growth=4.0", driver)
+        self.assertIn("pseudo_time_target_accepted_alpha=(0.25 if rescue else 0.0)", driver)
+        self.assertIn("RESCUE_MAX_JACOBIANS = 16", driver)
+        self.assertIn("292017c2262fb3fe03a3c6a51af6cbbeb7a10552", driver)
         self.assertIn("physical_pseudo_transient_matrix", (
             R26_ROOT / "r26_solver.py"
         ).read_text(encoding="utf-8"))
         self.assertIn("#SBATCH --mem=32G", slurm)
         self.assertIn("#SBATCH --time=08:00:00", slurm)
         self.assertIn("maximum_grid_run", slurm)
-        self.assertIn("RAW_GUARDED_PTC_GROWTH", slurm)
+        self.assertIn("ALPHA_AWARE_PTC", slurm)
         self.assertIn("n36_authorized", slurm)
         self.assertIn("n40_authorized", slurm)
         self.assertNotIn("N36/", slurm)
@@ -620,7 +623,7 @@ class MaxwellContract(unittest.TestCase):
         self.assertIn("_RESULTS.zip", slurm)
         self.assertIn("R26_GE_JFM_N32_FAILED_DIR", submit)
         self.assertIn("R26_GE_JFM_N32_PTC_REF", submit)
-        self.assertIn("R26_GU_EMERSON_JFM_N32_RAW_GUARDED_PTC_GROWTH_", submit)
+        self.assertIn("R26_GU_EMERSON_JFM_N32_ALPHA_AWARE_PTC_", submit)
 
     def test_validator_requires_declared_grid_beta(self) -> None:
         environment = dict(__import__("os").environ)

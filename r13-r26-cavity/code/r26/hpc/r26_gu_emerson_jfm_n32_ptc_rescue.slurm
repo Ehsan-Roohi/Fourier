@@ -1,15 +1,15 @@
 #!/bin/bash
-# Resume N32 with raw-guarded PTC and DAE-aware growth toward steady Newton.
+# Resume N32 with raw-guarded, line-search-aware PTC growth toward Newton.
 # No grid above N32 is present in this job.
 
-#SBATCH --job-name=r26-ge-j32g
+#SBATCH --job-name=r26-ge-j32a
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
 #SBATCH --time=08:00:00
-#SBATCH --output=r26-ge-j32g-%j.out
-#SBATCH --error=r26-ge-j32g-%j.err
+#SBATCH --output=r26-ge-j32a-%j.out
+#SBATCH --error=r26-ge-j32a-%j.err
 
 set -euo pipefail
 
@@ -40,7 +40,7 @@ package_on_exit() {
 import datetime, json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 record = {
-    "status": "R26_GU_EMERSON_JFM_N32_RAW_GUARDED_PTC_GROWTH_JOB_FAILED",
+    "status": "R26_GU_EMERSON_JFM_N32_ALPHA_AWARE_PTC_JOB_FAILED",
     "source_commit": sys.argv[2],
     "created_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     "candidate_accepted": False,
@@ -120,10 +120,10 @@ if record.get("n40_authorized") is not False or record.get("n44_authorized") is 
 if record.get("maximum_grid_run") != 32:
     raise SystemExit("N32 PTC rescue changed grid scope")
 predecessor = record.get("predecessor_failure") or {}
-if predecessor.get("source_commit") != "3cd50dc5a45f9bf086ac99dfc8e8762dc5b7d402":
+if predecessor.get("source_commit") != "292017c2262fb3fe03a3c6a51af6cbbeb7a10552":
     raise SystemExit("N32 PTC predecessor provenance mismatch")
 PY
 
-echo "R26_GU_EMERSON_JFM_N32_RAW_GUARDED_PTC_GROWTH_COMPLETE"
+echo "R26_GU_EMERSON_JFM_N32_ALPHA_AWARE_PTC_COMPLETE"
 echo "R26_RESULTS_ZIP=${R26_GE_JFM_N32_PTC_OUT}_RESULTS.zip"
 echo "R26_RESULTS_SHA=${R26_GE_JFM_N32_PTC_OUT}_RESULTS.zip.sha256.txt"

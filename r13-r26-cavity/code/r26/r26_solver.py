@@ -104,6 +104,7 @@ class SolveOptions:
     pseudo_time_growth_limit: float = 2.0
     pseudo_time_minimum_accepted_alpha: float = 0.0
     pseudo_time_small_alpha_growth: float = 4.0
+    pseudo_time_target_accepted_alpha: float = 0.0
     newton_switch_tolerance: float = 1.0e-6
     require_raw_linf_decrease: bool = False
     max_jacobian_evaluations: int | None = None
@@ -141,6 +142,19 @@ class SolveOptions:
             raise ValueError("small-alpha pseudo-time growth must exceed one")
         if not 0.0 <= self.pseudo_time_minimum_accepted_alpha <= 1.0:
             raise ValueError("minimum accepted pseudo-time alpha must lie in [0, 1]")
+        if not (
+            np.isfinite(self.pseudo_time_target_accepted_alpha)
+            and 0.0 <= self.pseudo_time_target_accepted_alpha <= 1.0
+        ):
+            raise ValueError("target accepted pseudo-time alpha must lie in [0, 1]")
+        if (
+            self.pseudo_time_target_accepted_alpha > 0.0
+            and self.pseudo_time_target_accepted_alpha
+            < self.pseudo_time_minimum_accepted_alpha
+        ):
+            raise ValueError(
+                "target accepted pseudo-time alpha cannot be below the alpha floor"
+            )
         if self.require_raw_linf_decrease and not self.pseudo_transient:
             raise ValueError("raw-Linf line-search protection requires pseudo-transient mode")
         if self.max_jacobian_evaluations is not None and self.max_jacobian_evaluations < 1:
@@ -919,6 +933,26 @@ def solve_r26_bvp(
                                     ser_ratio ** options.pseudo_time_ser_exponent,
                                 ),
                             )
+                            # Classical SER sees only the achieved residual
+                            # ratio.  After a heavily damped line-search step
+                            # that ratio is necessarily close to one, so SER
+                            # otherwise freezes dt even when the accepted alpha
+                            # says that the physical/algebraic PTC direction is
+                            # far from its useful Newton limit.  Use alpha as a
+                            # second, bounded continuation signal.  The raw
+                            # guard and the ordinary merit test still decide
+                            # every state acceptance.
+                            if (
+                                options.pseudo_time_target_accepted_alpha > 0.0
+                                and alpha
+                                < options.pseudo_time_target_accepted_alpha
+                            ):
+                                alpha_growth = min(
+                                    options.pseudo_time_small_alpha_growth,
+                                    options.pseudo_time_target_accepted_alpha
+                                    / alpha,
+                                )
+                                growth = max(growth, alpha_growth)
                             pseudo_time_step = float(
                                 np.clip(
                                     pseudo_time_step * growth,
@@ -940,8 +974,17 @@ def solve_r26_bvp(
                             )
                         if (
                             (not use_pseudo_transient and trial_merit > 0.25 * merit)
-                            or (use_pseudo_transient and trial_merit > 0.95 * merit)
+                            or (
+                                use_pseudo_transient
+                                and alpha >= 0.5
+                                and trial_merit > 0.95 * merit
+                            )
                         ):
+                            # A tiny accepted state displacement does not make
+                            # the Jacobian stale.  Refresh-on-small-merit used
+                            # to rebuild the N32 Jacobian after every damped
+                            # alpha=1/32...1/512 step, even though each update
+                            # moved only a fraction of the computed direction.
                             force_jacobian_refresh = True
                         break
                     alpha *= 0.5
