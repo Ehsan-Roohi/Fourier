@@ -29,6 +29,18 @@ JFM_N32_DOGLEG_SLURM = (
 JFM_N32_DOGLEG_SUBMIT = (
     R26_ROOT / "hpc" / "submit_r26_gu_emerson_jfm_n32_raw_dogleg.sh"
 )
+JFM_GRID_CONTINUATION_DRIVER = (
+    R26_ROOT / "analysis" / "run_r26_gu_emerson_jfm_n29_n31_grid_continuation.py"
+)
+JFM_GRID_CONTINUATION_VALIDATOR = (
+    R26_ROOT / "tools" / "validate_r26_gu_emerson_jfm_n29_n31_grid_continuation.py"
+)
+JFM_GRID_CONTINUATION_SLURM = (
+    R26_ROOT / "hpc" / "r26_gu_emerson_jfm_n29_n32_grid_continuation.slurm"
+)
+JFM_GRID_CONTINUATION_SUBMIT = (
+    R26_ROOT / "hpc" / "submit_r26_gu_emerson_jfm_n29_n32_grid_continuation.sh"
+)
 N8_N16_GATE_SLURM = R26_ROOT / "hpc" / "r26_kn020_ser_ptc_gate_n8_n16.slurm"
 N30_PRODUCTION_SLURM = R26_ROOT / "hpc" / "r26_kn020_ser_ptc_fresh_n30.slurm"
 N30_SUBMIT = R26_ROOT / "hpc" / "submit_r26_kn020_ser_ptc_fresh_n30.sh"
@@ -623,6 +635,33 @@ class MaxwellContract(unittest.TestCase):
         self.assertIn("R26_GE_JFM_N32_FAILED_DIR", submit)
         self.assertIn("R26_GE_JFM_N32_DOGLEG_REF", submit)
         self.assertIn("R26_GU_EMERSON_JFM_N32_RAW_DOGLEG_", submit)
+
+    def test_jfm_one_node_grid_continuation_is_ordered_and_fail_closed(self) -> None:
+        n32_driver = JFM_N32_DRIVER.read_text(encoding="utf-8")
+        driver = JFM_GRID_CONTINUATION_DRIVER.read_text(encoding="utf-8")
+        validator = JFM_GRID_CONTINUATION_VALIDATOR.read_text(encoding="utf-8")
+        slurm = JFM_GRID_CONTINUATION_SLURM.read_text(encoding="utf-8")
+        submit = JFM_GRID_CONTINUATION_SUBMIT.read_text(encoding="utf-8")
+        self.assertIn("STAGE_NODES = (29, 30, 31)", driver)
+        self.assertIn("if not accepted:", driver)
+        self.assertIn("N{nodes} stage rejected; N{nodes + 1} was not attempted", driver)
+        self.assertIn('direction_strategy="raw_dogleg"', driver)
+        self.assertIn("require_raw_linf_decrease=True", driver)
+        self.assertIn("candidate_raw <= RAW_TOLERANCE", driver)
+        self.assertIn("conservation_passed", driver)
+        self.assertIn("--accepted-n31-dir", n32_driver)
+        self.assertIn("accepted_N31_root_interpolated_one_cell_to_N32", n32_driver)
+        self.assertIn("for nodes in (29, 30, 31):", validator)
+        self.assertIn("N29_N31_INDEPENDENT_VALIDATION_PASSED", validator)
+        self.assertIn("#SBATCH --mem=32G", slurm)
+        self.assertIn("#SBATCH --time=12:00:00", slurm)
+        self.assertLess(slurm.index("n29_n31_grid_continuation.py"), slurm.index("--accepted-n31-dir"))
+        self.assertIn("package_on_exit", slurm)
+        self.assertIn("n36_authorized", slurm)
+        self.assertNotIn("/N36", slurm)
+        self.assertNotIn("/N40", slurm)
+        self.assertIn("R26_GE_JFM_GRID_CONTINUATION_REF", submit)
+        self.assertIn("R26_GU_EMERSON_JFM_N29_N32_GRID_CONTINUATION_", submit)
 
     def test_validator_requires_declared_grid_beta(self) -> None:
         environment = dict(__import__("os").environ)

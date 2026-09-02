@@ -210,15 +210,69 @@ def load_failed_n32_candidate(
     return state, record
 
 
+def load_accepted_n31_candidate(
+    stage_dir: Path,
+    *,
+    source_commit: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, object]]:
+    """Load a source-locked accepted N31 grid-continuation predecessor."""
+
+    record_path = stage_dir / "JFM_N31_GRID_CONTINUATION_STAGE.json"
+    archive_path = stage_dir / "gu_emerson_jfm_n31_grid_continuation.npz"
+    require(record_path.is_file(), "accepted N31 stage record is missing")
+    require(archive_path.is_file(), "accepted N31 stage archive is missing")
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    require(isinstance(record, dict), "accepted N31 record is not an object")
+    require(
+        record.get("status") == "R26_GU_EMERSON_JFM_N31_GRID_CONTINUATION_PASSED",
+        "predecessor N31 status did not pass",
+    )
+    require(record.get("source_commit") == source_commit, "N31 source mismatch")
+    require(record.get("candidate_accepted") is True, "N31 candidate is rejected")
+    require(record.get("n32_authorized") is True, "N31 did not authorize N32")
+    require(record.get("n36_authorized") is False, "N31 over-authorized N36")
+    require(record.get("maximum_grid_run") == 31, "N31 grid scope mismatch")
+    with np.load(archive_path, allow_pickle=False) as archive:
+        state = np.asarray(archive["state"], dtype=float)
+        x = np.asarray(archive["x"], dtype=float)
+        y = np.asarray(archive["y"], dtype=float)
+        require(bool(np.asarray(archive["accepted"]).item()), "N31 archive is rejected")
+        require(int(np.asarray(archive["nodes"]).item()) == 31, "N31 node mismatch")
+        require(
+            str(np.asarray(archive["source_commit"]).item()) == source_commit,
+            "N31 archive source mismatch",
+        )
+        require(
+            bool(np.asarray(archive["n32_authorized"]).item()),
+            "N31 archive blocks N32",
+        )
+        require(
+            not bool(np.asarray(archive["n36_authorized"]).item()),
+            "N31 archive authorizes N36",
+        )
+    require(state.shape == (31, 31, 17), "N31 state shape mismatch")
+    require(
+        state_sha256(state) == record.get("candidate", {}).get("state_sha256"),
+        "N31 candidate hash mismatch",
+    )
+    return state, x, y, record
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--n28-gate-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--source-commit", required=True)
-    parser.add_argument(
+    predecessor_group = parser.add_mutually_exclusive_group()
+    predecessor_group.add_argument(
         "--failed-n32-dir",
         type=Path,
         help="resume only from the exact source-locked failed N32 candidate",
+    )
+    predecessor_group.add_argument(
+        "--accepted-n31-dir",
+        type=Path,
+        help="continue only from a source-locked accepted N31 root",
     )
     args = parser.parse_args()
     if re.fullmatch(r"[0-9a-f]{40}", args.source_commit) is None:
@@ -254,7 +308,32 @@ def main() -> None:
             mass_weights=wall_bounded_control_volume_weights(case.x, case.y),
         )
         predecessor_failure = None
-        if args.failed_n32_dir is None:
+        predecessor_stage = None
+        if args.failed_n32_dir is not None:
+            seed, predecessor_failure = load_failed_n32_candidate(
+                args.failed_n32_dir,
+                case=case,
+            )
+            seed_kind = (
+                "source_locked_failed_N32_candidate_for_raw_dogleg_trust_region"
+            )
+        elif args.accepted_n31_dir is not None:
+            n31, n31_x, n31_y, predecessor_stage = load_accepted_n31_candidate(
+                args.accepted_n31_dir,
+                source_commit=args.source_commit,
+            )
+            seed = interpolate_state_grid(
+                n31,
+                32,
+                target_mean_density=case.mean_density,
+                mass_weights=problem.mass_weights,
+                old_x=n31_x,
+                old_y=n31_y,
+                new_x=case.x,
+                new_y=case.y,
+            )
+            seed_kind = "accepted_N31_root_interpolated_one_cell_to_N32"
+        else:
             seed = interpolate_state_grid(
                 reference,
                 32,
@@ -266,14 +345,6 @@ def main() -> None:
                 new_y=case.y,
             )
             seed_kind = "accepted_transformed_N28_interpolated_to_N32"
-        else:
-            seed, predecessor_failure = load_failed_n32_candidate(
-                args.failed_n32_dir,
-                case=case,
-            )
-            seed_kind = (
-                "source_locked_failed_N32_candidate_for_raw_dogleg_trust_region"
-            )
         transform = GuEmersonLogStateTransform(case)
         seed_roundtrip = transform.decode(transform.encode(seed))
         seed_roundtrip_linf = float(
@@ -291,7 +362,7 @@ def main() -> None:
                 ),
                 "failed N32 seed raw gate does not replay",
             )
-        rescue = predecessor_failure is not None
+        rescue = predecessor_failure is not None or predecessor_stage is not None
         options = SolveOptions(
             method="colored_newton",
             residual_tolerance=1.0e-9,
@@ -445,6 +516,19 @@ def main() -> None:
                         "raw_gate"
                     ],
                     "solver_message": predecessor_failure["solver"]["message"],
+                }
+            ),
+            "predecessor_grid_stage": (
+                None
+                if predecessor_stage is None
+                else {
+                    "source_commit": predecessor_stage["source_commit"],
+                    "status": predecessor_stage["status"],
+                    "candidate_state_sha256": predecessor_stage["candidate"][
+                        "state_sha256"
+                    ],
+                    "candidate_raw_gate": predecessor_stage["candidate"]["raw_gate"],
+                    "nodes": 31,
                 }
             ),
             "candidate": {
